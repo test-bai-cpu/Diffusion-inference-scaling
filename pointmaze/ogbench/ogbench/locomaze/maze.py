@@ -43,6 +43,8 @@ def make_maze_env(loco_env_type, maze_env_type, *args, **kwargs):
             add_noise_to_goal=True,
             reward_task_id=None,
             use_oracle_rep=False,
+            maze_json_file=None,
+            maze_variant_idx=0,
             *args,
             **kwargs,
         ):
@@ -178,6 +180,12 @@ def make_maze_env(loco_env_type, maze_env_type, *args, **kwargs):
                 ]
             else:
                 raise ValueError(f'Unknown maze type: {self._maze_type}')
+
+            if maze_json_file is not None:
+                import json as _json
+                with open(maze_json_file) as _f:
+                    _data = _json.load(_f)
+                maze_map = _data['variants'][maze_variant_idx]['maze_map']
 
             self.maze_map = np.array(maze_map)
 

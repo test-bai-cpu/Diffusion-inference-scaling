@@ -37,7 +37,8 @@ class BasePipe:
 
         #---------------------------------- loading ----------------------------------#
 
-        diffusion_experiment = utils.load_diffusion(args.logbase, args.dataset, args.diffusion_loadpath, epoch=args.diffusion_epoch, device=self.args.device)
+        model_dataset = getattr(self.args, 'model_dataset', '') or self.args.dataset
+        diffusion_experiment = utils.load_diffusion(args.logbase, model_dataset, args.diffusion_loadpath, epoch=args.diffusion_epoch, device=self.args.device)
 
         diffusion = diffusion_experiment.ema
         diffusion.horizon = self.args.sampling_horizon   ## change the horizon at sampling time
@@ -171,6 +172,17 @@ class BasePipe:
         return total_results
         
     
+    def _make_env(self, task_id=None):
+        """Create env, loading OOD map from JSON when maze_json_dir is set."""
+        env_kwargs = {}
+        maze_json_dir = getattr(self.args, 'maze_json_dir', '')
+        if maze_json_dir and task_id is not None:
+            maze_type = self.env_args.dataset.split('-')[1]  # e.g. 'giant' from 'pointmaze-giant-...'
+            json_file = os.path.join(maze_json_dir, f'{maze_type}_task{task_id}.json')
+            env_kwargs['maze_json_file'] = json_file
+            env_kwargs['maze_variant_idx'] = getattr(self.args, 'maze_variant_idx', 0)
+        return datasets.load_environment(self.env_args.dataset, **env_kwargs)
+
     def experiment(self, **kwargs):
         import time
         exp_name = self.env_args.exp_name
@@ -183,7 +195,10 @@ class BasePipe:
 
         returns = {}
         tasks = self.args.task
-        for task_id in tasks:  
+        use_json = bool(getattr(self.args, 'maze_json_dir', ''))
+        for task_id in tasks:
+            if use_json:
+                self.env = self._make_env(task_id)
             total_results = self.eval(self.args.num_samples, path=path, task_id=task_id)
             returns[task_id] = total_results
             result_str = f"Task: {task_id} | Success Rate: {total_results['total_reward']:.2f}"
@@ -192,7 +207,7 @@ class BasePipe:
         returns['average'] = {}
         for key in total_results:
             returns['average'][key] = np.mean([returns[task][key] for task in tasks]).item()
-           
+
         return returns
 
         

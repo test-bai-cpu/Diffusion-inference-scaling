@@ -142,6 +142,17 @@ pointmaze_giant_navigate_v0 = {
 }
 
 
+pointmaze_giant_newvar_navigate_v0 = {
+    'diffusion': {
+        'horizon': 400,
+        'n_diffusion_steps': 256,
+    },
+    'plan': {
+        'horizon': 400,
+        'n_diffusion_steps': 256,
+    },
+}
+
 pointmaze_ultra_navigate_v0 = {
     'diffusion': {
         'horizon': 2000,

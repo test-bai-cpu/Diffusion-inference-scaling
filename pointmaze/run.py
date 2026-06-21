@@ -1,13 +1,16 @@
 from search.configs import Arguments
 from search.script_utils import get_pipe, get_args
 
-def main(dataset: str="pointmaze-giant-navigate-v0", method: str='dfs', device: str="cuda:7", version: str=''):
+def main(dataset: str="pointmaze-giant-navigate-v0", method: str='dfs', device: str="cuda:7", version: str='',
+         maze_json_dir: str='', maze_variant_idx: int=0):
     args = Arguments()
     args.device = device
     args.dataset = dataset
     args.method = method
     args.version = version
     args.task = [1, 2, 3, 4, 5]
+    args.maze_json_dir = maze_json_dir
+    args.maze_variant_idx = maze_variant_idx
     args_grid = get_args(args)
 
     for args in args_grid:
@@ -25,10 +28,10 @@ def main(dataset: str="pointmaze-giant-navigate-v0", method: str='dfs', device: 
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Run inference scaling experiment.")
-    parser.add_argument('--dataset', 
-                        type=str, 
-                        default='pointmaze-ultra-navigate-v0', 
-                        choices=['pointmaze-giant-navigate-v0', 'pointmaze-ultra-navigate-v0'],
+    parser.add_argument('--dataset',
+                        type=str,
+                        default='pointmaze-ultra-navigate-v0',
+                        choices=['pointmaze-giant-navigate-v0', 'pointmaze-giant-newvar-navigate-v0', 'pointmaze-ultra-navigate-v0'],
                         help='Maze env to use for the experiment.')
     parser.add_argument('--method', 
                         type=str, 
@@ -43,6 +46,15 @@ if __name__ == "__main__":
                         type=str,
                         default='',
                         help='Optional version tag (e.g. ada) shown in results and folder names.')
+    parser.add_argument('--maze_json_dir',
+                        type=str,
+                        default='',
+                        help='Dir containing giant_task{N}.json files. When set, each task uses its OOD map.')
+    parser.add_argument('--maze_variant_idx',
+                        type=int,
+                        default=0,
+                        help='Index into the variants list in the JSON file (same index used for all tasks).')
     cli_args = parser.parse_args()
 
-    main(dataset=cli_args.dataset, method=cli_args.method, device=cli_args.device, version=cli_args.version)
+    main(dataset=cli_args.dataset, method=cli_args.method, device=cli_args.device, version=cli_args.version,
+         maze_json_dir=cli_args.maze_json_dir, maze_variant_idx=cli_args.maze_variant_idx)

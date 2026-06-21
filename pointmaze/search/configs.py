@@ -58,3 +58,8 @@ class Arguments:
     start_step: int = field(default=4)
     step_size: int = field(default=4)
 
+    # for OOD maze variants loaded from JSON
+    maze_json_dir: str = field(default='')   # dir containing giant_task{N}.json files
+    maze_variant_idx: int = field(default=0)
+    model_dataset: str = field(default='')   # checkpoint dataset; defaults to dataset if empty
+

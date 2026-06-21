@@ -15,3 +15,10 @@
 # MUJOCO_GL=egl python run.py --dataset pointmaze-giant-navigate-v0 --method dfs
 
 MUJOCO_GL=egl python run.py --dataset pointmaze-giant-navigate-v0 --method dfs --version all
+
+MUJOCO_GL=egl python run.py \
+  --dataset pointmaze-giant-newvar-navigate-v0 \
+  --method dfs \
+  --maze_json_dir ../maze_update/maze_variants \
+  --maze_variant_idx 0
+  --version level0.1
