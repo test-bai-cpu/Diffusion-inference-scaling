@@ -7,6 +7,7 @@ def main(dataset: str="pointmaze-giant-navigate-v0", method: str='dfs', device: 
     args.dataset = dataset
     args.method = method
     args.version = version
+    args.task = [1, 2, 3, 4, 5]
     args_grid = get_args(args)
 
     for args in args_grid:
