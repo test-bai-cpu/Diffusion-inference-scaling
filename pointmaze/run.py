@@ -1,13 +1,14 @@
 from search.configs import Arguments
 from search.script_utils import get_pipe, get_args
 
-def main(dataset: str="pointmaze-giant-navigate-v0", method: str='dfs', device: str="cuda:7"):
+def main(dataset: str="pointmaze-giant-navigate-v0", method: str='dfs', device: str="cuda:7", version: str=''):
     args = Arguments()
     args.device = device
     args.dataset = dataset
     args.method = method
+    args.version = version
     args_grid = get_args(args)
-    
+
     for args in args_grid:
         pipe = get_pipe(args)
         returns = pipe.experiment()
@@ -15,8 +16,9 @@ def main(dataset: str="pointmaze-giant-navigate-v0", method: str='dfs', device: 
         average_compute = returns['average']['compute']
         print(f"Success Rate: {success_rate}, Average Compute: {average_compute}")
         output_file = f'results_{args.method}_{args.dataset}.txt'
+        version_str = f" | Version: {args.version}" if args.version else ""
         with open(output_file, 'a') as f:
-            f.write(f"Maze: {args.dataset} | Method: {args.method} | Compute: {average_compute} | Success Rate: {success_rate}\n")
+            f.write(f"Maze: {args.dataset} | Method: {args.method}{version_str} | Compute: {average_compute} | Success Rate: {success_rate}\n")
 
 
 if __name__ == "__main__":
@@ -36,6 +38,10 @@ if __name__ == "__main__":
                         type=str,
                         default='cuda',
                         )
+    parser.add_argument('--version',
+                        type=str,
+                        default='',
+                        help='Optional version tag (e.g. ada) shown in results and folder names.')
     cli_args = parser.parse_args()
 
-    main(dataset=cli_args.dataset, method=cli_args.method, device=cli_args.device)
+    main(dataset=cli_args.dataset, method=cli_args.method, device=cli_args.device, version=cli_args.version)

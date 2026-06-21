@@ -157,3 +157,5 @@ archieve/
 process_data.py
 *.pdf
 .vscode/
+
+ogbench/data
