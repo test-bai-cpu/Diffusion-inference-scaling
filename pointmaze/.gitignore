@@ -158,3 +158,6 @@ process_data.py
 .vscode/
 
 ogbench/data
+
+slurm*.out
+slurm*.err
