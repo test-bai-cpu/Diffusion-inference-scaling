@@ -149,7 +149,6 @@ dmypy.json
 *.yaml
 *.csv
 
-*.sh
 archieve/
 
 *test*
