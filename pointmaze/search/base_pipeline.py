@@ -199,6 +199,7 @@ class BasePipe:
         for task_id in tasks:
             if use_json:
                 self.env = self._make_env(task_id)
+                self.env_renderer.env = self.env  # render background from OOD map
             total_results = self.eval(self.args.num_samples, path=path, task_id=task_id)
             returns[task_id] = total_results
             result_str = f"Task: {task_id} | Success Rate: {total_results['total_reward']:.2f}"

@@ -2,13 +2,13 @@ from search.configs import Arguments
 from search.script_utils import get_pipe, get_args
 
 def main(dataset: str="pointmaze-giant-navigate-v0", method: str='dfs', device: str="cuda:7", version: str='',
-         maze_json_dir: str='', maze_variant_idx: int=0):
+         task=None, maze_json_dir: str='', maze_variant_idx: int=0):
     args = Arguments()
     args.device = device
     args.dataset = dataset
     args.method = method
     args.version = version
-    args.task = [1, 2, 3, 4, 5]
+    args.task = task if task is not None else [1, 2, 3, 4, 5]
     args.maze_json_dir = maze_json_dir
     args.maze_variant_idx = maze_variant_idx
     args_grid = get_args(args)
@@ -31,7 +31,7 @@ if __name__ == "__main__":
     parser.add_argument('--dataset',
                         type=str,
                         default='pointmaze-ultra-navigate-v0',
-                        choices=['pointmaze-giant-navigate-v0', 'pointmaze-giant-newvar-navigate-v0', 'pointmaze-ultra-navigate-v0'],
+                        choices=['pointmaze-giant-navigate-v0', 'pointmaze-giant-newvar-navigate-v0', 'pointmaze-giant-newvar2-navigate-v0', 'pointmaze-ultra-navigate-v0'],
                         help='Maze env to use for the experiment.')
     parser.add_argument('--method', 
                         type=str, 
@@ -46,6 +46,11 @@ if __name__ == "__main__":
                         type=str,
                         default='',
                         help='Optional version tag (e.g. ada) shown in results and folder names.')
+    parser.add_argument('--task',
+                        type=int,
+                        nargs='+',
+                        default=[1, 2, 3, 4, 5],
+                        help='Task IDs to evaluate, e.g. --task 1 2 3 4 5.')
     parser.add_argument('--maze_json_dir',
                         type=str,
                         default='',
@@ -57,4 +62,5 @@ if __name__ == "__main__":
     cli_args = parser.parse_args()
 
     main(dataset=cli_args.dataset, method=cli_args.method, device=cli_args.device, version=cli_args.version,
+         task=cli_args.task,
          maze_json_dir=cli_args.maze_json_dir, maze_variant_idx=cli_args.maze_variant_idx)

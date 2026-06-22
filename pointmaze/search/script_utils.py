@@ -88,7 +88,8 @@ def get_args(args: Arguments) -> List[Arguments]:
             args.per_sample_batch_size = 1
             args.step_size = 1
             args.threshold_schedule = 'increase'
-            for (depth, budget, threshold) in [(12, 20, 6), (12, 20, 4), (14, 20, 2)]:
+            # for (depth, budget, threshold) in [(12, 20, 6), (12, 20, 4), (14, 20, 2)]:
+            for (depth, budget, threshold) in [(12, 20, 6)]:
                 cur_args = deepcopy(args)
                 cur_args.budget = budget
                 cur_args.threshold = threshold
