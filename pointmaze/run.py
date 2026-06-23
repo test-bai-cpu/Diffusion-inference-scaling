@@ -20,9 +20,9 @@ def main(dataset: str="pointmaze-giant-navigate-v0", method: str='dfs', device: 
         average_compute = returns['average']['compute']
         print(f"Success Rate: {success_rate}, Average Compute: {average_compute}")
         output_file = f'results_{args.method}_{args.dataset}.txt'
-        version_str = f" | Version: {args.version}" if args.version else ""
+        run_str = args.version if args.version else args.method
         with open(output_file, 'a') as f:
-            f.write(f"Maze: {args.dataset} | Method: {args.method}{version_str} | Compute: {average_compute} | Success Rate: {success_rate}\n")
+            f.write(f"Maze: {args.dataset} | Run: {run_str} | Compute: {average_compute} | Success Rate: {success_rate}\n")
 
 
 if __name__ == "__main__":

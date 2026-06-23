@@ -11,6 +11,10 @@ class BFSGuidance(BaseGuidance):
         self.local_search = TFGGuidance(args, **kwargs)
 
 
+    def update_env(self, env):
+        super().update_env(env)
+        self.local_search.update_env(env)
+
     def get_temp(self, t, alpha_prod_ts, alpha_prod_t_prevs):
         if self.args.temp_schedule == 'decrease':    # beta_t
             scheduler = 1 - alpha_prod_ts / alpha_prod_t_prevs

@@ -58,7 +58,9 @@ class BasePipe:
 
         #---------------------------------- setup policy -------------------------------#
         self.policy.setup(policy, diffusion, **kwargs)
-    
+        if self.guidance is not None:
+            self.guidance.update_env(self.env)
+
  
 
     def sample(self, **kwargs):
@@ -184,10 +186,12 @@ class BasePipe:
         return datasets.load_environment(self.env_args.dataset, **env_kwargs)
 
     def experiment(self, **kwargs):
-        import time
         exp_name = self.env_args.exp_name
-        cur_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-        path = f"{self.args.logging_dir}/{self.args.dataset}/inference/{exp_name}/{cur_time}/"
+        import time
+        version = getattr(self.args, 'version', '')
+        use_json = bool(getattr(self.args, 'maze_json_dir', ''))
+        run_tag = version if version else time.strftime("%Y-%m-%d-%H:%M:%S", time.localtime())
+        path = f"{self.args.logging_dir}/{self.args.dataset}/inference/{exp_name}/{run_tag}/"
         os.makedirs(path, exist_ok=True)
         with open(join(path, 'args.json'), 'w') as f:
             json.dump(vars(self.args), f, indent=2, sort_keys=True)
@@ -195,11 +199,12 @@ class BasePipe:
 
         returns = {}
         tasks = self.args.task
-        use_json = bool(getattr(self.args, 'maze_json_dir', ''))
         for task_id in tasks:
             if use_json:
                 self.env = self._make_env(task_id)
                 self.env_renderer.env = self.env  # render background from OOD map
+                if self.guidance is not None:
+                    self.guidance.update_env(self.env)
             total_results = self.eval(self.args.num_samples, path=path, task_id=task_id)
             returns[task_id] = total_results
             result_str = f"Task: {task_id} | Success Rate: {total_results['total_reward']:.2f}"

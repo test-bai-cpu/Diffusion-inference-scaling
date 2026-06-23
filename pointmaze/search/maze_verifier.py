@@ -1,5 +1,4 @@
 import torch
-from diffuser import datasets
 
 
 def distance_to_closest_non_adjacent_wall_boundary(pos, wall_pos, wall_size, adjacency):
@@ -95,10 +94,13 @@ from search.configs import Arguments
 
 class MazeVerifier():
     def __init__(self, args: Arguments = Arguments()):
-        self.env = datasets.load_environment(args.dataset)
-        device = torch.device(args.device)
-        self.wall_boxes, self.adjacency = get_wall_boxes_and_adjacency(self.env,device=device)
-        self.device = device
+        self.device = torch.device(args.device)
+        self.wall_boxes = None
+        self.adjacency = None
+
+    def update_env(self, env):
+        self.env = env
+        self.wall_boxes, self.adjacency = get_wall_boxes_and_adjacency(env, device=self.device)
 
     def get_guidance(self, x, func=lambda x:x, post_process=lambda x:x, return_logp=False, check_grad=True, **kwargs):
         if check_grad:

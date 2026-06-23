@@ -17,25 +17,46 @@
 # MUJOCO_GL=egl python run.py --dataset pointmaze-giant-navigate-v0 --method dfs --version all
 
 for task in 1 2 3 4 5; do
-  case "${task}" in
-    1) choices=(3 2 2 2) ;;
-    2) choices=(2 1 1 1) ;;
-    3) choices=(1 1 2 3) ;;
-    4) choices=(2 2 3 1) ;;
-    5) choices=(3 1 3 1) ;;
-  esac
-
-  for level_idx in "${!choices[@]}"; do
+  for level_idx in 0 1 2 3; do
     level=$((level_idx + 1))
-    choice="${choices[$level_idx]}"
-    variant_idx=$((level_idx * 3 + choice - 1))
+    for v in 0 1 2; do
+      variant_idx=$((level_idx * 3 + v))
+      method="dfs"
+      echo "Running task ${task}, level ${level}, variant_idx ${variant_idx} with method ${method}"
 
-    MUJOCO_GL=egl python run.py \
-      --dataset pointmaze-giant-newvar2-navigate-v0 \
-      --method dfs \
-      --maze_json_dir ../maze_update/maze_variants \
-      --maze_variant_idx "${variant_idx}" \
-      --version "task${task}_level${level}" \
-      --task "${task}"
+      MUJOCO_GL=egl python run.py \
+        --dataset pointmaze-giant-newvar-navigate-v0 \
+        --method "${method}" \
+        --maze_json_dir ../maze_update/maze_variants \
+        --maze_variant_idx "${variant_idx}" \
+        --version "${method}-task${task}-level${level}-variant$((v+1))" \
+        --task "${task}"
+    done
   done
 done
+
+# for task in 1 2 3 4 5; do
+#   case "${task}" in
+#     1) choices=(3 2 2 2) ;;
+#     2) choices=(2 1 1 1) ;;
+#     3) choices=(1 1 2 3) ;;
+#     4) choices=(2 2 3 1) ;;
+#     5) choices=(3 1 3 1) ;;
+#   esac
+
+#   for level_idx in "${!choices[@]}"; do
+#     level=$((level_idx + 1))
+#     choice="${choices[$level_idx]}"
+#     variant_idx=$((level_idx * 3 + choice - 1))
+#     method="dfs"
+#     echo "Running task ${task}, level ${level}, variant ${variant_idx} with method ${method}"
+
+#     MUJOCO_GL=egl python run.py \
+#       --dataset pointmaze-giant-newvar-navigate-v0 \
+#       --method "${method}" \
+#       --maze_json_dir ../maze_update/maze_variants \
+#       --maze_variant_idx "${variant_idx}" \
+#       --version "${method}-task${task}-level${level}-variant${level_idx+1}" \
+#       --task "${task}"
+#   done
+# done

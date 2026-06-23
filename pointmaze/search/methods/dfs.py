@@ -31,6 +31,10 @@ class DFSGuidance(BaseGuidance):
         end = self.args.inference_steps
         return list(range(start, end, step))
 
+    def update_env(self, env):
+        super().update_env(env)
+        self.local_search.update_env(env)
+
     def reset(self, **kwargs):
         self.budget = self.args.budget
         self.buffer = [{} for _ in range(self.args.inference_steps)]

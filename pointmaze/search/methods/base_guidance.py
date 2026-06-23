@@ -21,6 +21,9 @@ class BaseGuidance:
         else:
             self.noise_fn = noise_fn
 
+    def update_env(self, env):
+        self.guider.update_env(env)
+
     def reset(self, **kwargs):
         pass
     
