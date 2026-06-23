@@ -64,7 +64,6 @@ def get_wall_boxes_and_adjacency(env,device):
                 if consider_ball:
                     wall_size = (wall_size[0] + 0.7, wall_size[1] + 0.7)
                 assert wall_pos == env.ij_to_xy((i, j))
-                wall_boxes.append((wall_pos, wall_size))
                 adjacency = [1] * 4
                 if i > 0 and env.maze_map[i-1, j] == 1 or i == 0:
                     adjacency[0] = 0
@@ -79,8 +78,9 @@ def get_wall_boxes_and_adjacency(env,device):
                     elif i == env.maze_map.shape[0]-1: adjacency[0] = 1
                     elif j == 0: adjacency[3] = 1
                     elif j == env.maze_map.shape[1]-1: adjacency[2] = 1
-                    else: raise ValueError("Invalid adjacency")
+                    else: adjacency = [1, 1, 1, 1]  # interior wall fully surrounded by walls: penalize from all faces
 
+                wall_boxes.append((wall_pos, wall_size))
                 wall_adjacency.append(adjacency)
     
     # Convert wall_boxes into torch tensors
