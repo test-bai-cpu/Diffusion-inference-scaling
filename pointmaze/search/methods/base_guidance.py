@@ -10,7 +10,7 @@ class BaseGuidance:
     def __init__(self, args: Arguments, noise_fn: None=None):
 
         self.args = args
-        self.guider = MazeVerifier(args)
+        self.guider = self._build_verifier(args)
         self.generator = torch.manual_seed(self.args.seed)
         self.device = torch.device(self.args.device)
         if noise_fn is None:
@@ -20,6 +20,29 @@ class BaseGuidance:
             self.noise_fn = noise_fn
         else:
             self.noise_fn = noise_fn
+
+    @staticmethod
+    def _build_verifier(args):
+        """
+        Build the verifier used by self.guider.
+
+        When args.use_distance_field is True, returns a CompositeVerifier that
+        wraps both MazeVerifier and DistanceFieldVerifier.  Otherwise returns
+        a plain MazeVerifier (default behaviour, no regression).
+        """
+        maze_verifier = MazeVerifier(args)
+        if not getattr(args, 'use_distance_field', False):
+            return maze_verifier
+
+        from search.distance_field_verifier import DistanceFieldVerifier
+        from search.composite_verifier import CompositeVerifier
+        dist_verifier = DistanceFieldVerifier(args)
+        maze_weight   = getattr(args, 'maze_weight', 1.0)
+        dist_weight   = getattr(args, 'dist_weight', 1.0)
+        return CompositeVerifier(
+            verifiers=[maze_verifier, dist_verifier],
+            weights=[maze_weight, dist_weight],
+        )
 
     def update_env(self, env):
         self.guider.update_env(env)

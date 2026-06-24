@@ -63,3 +63,16 @@ class Arguments:
     maze_variant_idx: int = field(default=0)
     model_dataset: str = field(default='')   # checkpoint dataset; defaults to dataset if empty
 
+    # BFS distance field guidance
+    use_distance_field: bool = field(default=False)
+    dist_omega: float = field(default=1.0)          # scale on distance-field cost
+    # NOTE: 'endpoint' is useless when apply_conditioning pins t=T-1 to goal (D=0 always).
+    # Use 'sum' (mean per timestep, range 0..max_BFS_dist) as the default.
+    # For DFS, tune --threshold upward when using 'sum' with omega=1.0 (effective cost ≈ 15
+    # for a good trajectory on the giant maze, vs the default DFS threshold of 6).
+    dist_mode: str = field(default='sum')            # endpoint | sum | weighted | monotonic
+    dist_smooth_sigma: float = field(default=0.5)    # Gaussian blur on raw BFS field
+    dist_connectivity: int = field(default=4)        # 4 or 8
+    maze_weight: float = field(default=1.0)          # weight of MazeVerifier in composite
+    dist_weight: float = field(default=1.0)          # weight of DistanceFieldVerifier in composite
+

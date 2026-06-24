@@ -2,7 +2,10 @@ from search.configs import Arguments
 from search.script_utils import get_pipe, get_args
 
 def main(dataset: str="pointmaze-giant-navigate-v0", method: str='dfs', device: str="cuda:7", version: str='',
-         task=None, maze_json_dir: str='', maze_variant_idx: int=0):
+         task=None, maze_json_dir: str='', maze_variant_idx: int=0,
+         use_distance_field: bool=False, dist_omega: float=1.0, dist_mode: str='sum',
+         dist_smooth_sigma: float=0.5, dist_connectivity: int=4,
+         maze_weight: float=1.0, dist_weight: float=1.0):
     args = Arguments()
     args.device = device
     args.dataset = dataset
@@ -11,6 +14,13 @@ def main(dataset: str="pointmaze-giant-navigate-v0", method: str='dfs', device: 
     args.task = task if task is not None else [1, 2, 3, 4, 5]
     args.maze_json_dir = maze_json_dir
     args.maze_variant_idx = maze_variant_idx
+    args.use_distance_field = use_distance_field
+    args.dist_omega = dist_omega
+    args.dist_mode = dist_mode
+    args.dist_smooth_sigma = dist_smooth_sigma
+    args.dist_connectivity = dist_connectivity
+    args.maze_weight = maze_weight
+    args.dist_weight = dist_weight
     args_grid = get_args(args)
 
     for args in args_grid:
@@ -59,8 +69,41 @@ if __name__ == "__main__":
                         type=int,
                         default=0,
                         help='Index into the variants list in the JSON file (same index used for all tasks).')
+    
+    # BFS distance field guidance
+    parser.add_argument('--use_distance_field',
+                        action='store_true', default=False,
+                        help='Enable BFS distance-field guidance at inference time.')
+    parser.add_argument('--dist_omega',
+                        type=float, default=1.0,
+                        help='Scale applied to distance-field cost (guidance strength).')
+    parser.add_argument('--dist_mode',
+                        type=str, default='sum',
+                        choices=['endpoint', 'sum', 'weighted', 'monotonic'],
+                        help='How per-timestep distances are aggregated into a cost. '
+                             'endpoint is broken when conditioning pins t=T-1 to goal (D=0 always). '
+                             'sum (mean per timestep) is recommended.')
+    parser.add_argument('--dist_smooth_sigma',
+                        type=float, default=0.5,
+                        help='Gaussian blur sigma on the raw BFS field (0 = no blur).')
+    parser.add_argument('--dist_connectivity',
+                        type=int, default=4, choices=[4, 8],
+                        help='BFS connectivity: 4 (N/S/E/W) or 8 (includes diagonals).')
+    parser.add_argument('--maze_weight',
+                        type=float, default=1.0,
+                        help='Weight of MazeVerifier in CompositeVerifier.')
+    parser.add_argument('--dist_weight',
+                        type=float, default=1.0,
+                        help='Weight of DistanceFieldVerifier in CompositeVerifier.')
     cli_args = parser.parse_args()
 
     main(dataset=cli_args.dataset, method=cli_args.method, device=cli_args.device, version=cli_args.version,
          task=cli_args.task,
-         maze_json_dir=cli_args.maze_json_dir, maze_variant_idx=cli_args.maze_variant_idx)
+         maze_json_dir=cli_args.maze_json_dir, maze_variant_idx=cli_args.maze_variant_idx,
+         use_distance_field=cli_args.use_distance_field,
+         dist_omega=cli_args.dist_omega,
+         dist_mode=cli_args.dist_mode,
+         dist_smooth_sigma=cli_args.dist_smooth_sigma,
+         dist_connectivity=cli_args.dist_connectivity,
+         maze_weight=cli_args.maze_weight,
+         dist_weight=cli_args.dist_weight)
