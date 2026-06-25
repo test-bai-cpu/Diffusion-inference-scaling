@@ -23,3 +23,9 @@ squeue -u $USER
 
 To watch the live output while it runs:
 tail -f slurm-<jobid>.out
+
+
+TODO:
+1. double check the plot function.
+2. Need to rethink about the map generation, and data collection.
+3. 

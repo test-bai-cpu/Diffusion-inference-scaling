@@ -163,3 +163,5 @@ slurm*.out
 slurm*.err
 
 outputs/
+
+results_*.txt
