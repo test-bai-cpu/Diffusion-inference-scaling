@@ -68,15 +68,37 @@ class _MapAwareComposite:
         self.collision_tol = getattr(args, 'mafgs_collision_tol', 0.05)
         self.stall_tol     = getattr(args, 'mafgs_stall_tol', 0.10)
         self.deadend_tol   = getattr(args, 'mafgs_deadend_tol', 0.15)
+        # Optional learned map-conditioned side model (MCGN). Added to the
+        # guidance signal ONLY when a checkpoint is configured; it never enters
+        # the feasibility gate, so a bad prediction cannot cut a corner or enter
+        # a dead-end that the analytic gate would reject. Absent a checkpoint the
+        # verifier contributes exactly zero (identity), so plain MAFGS is
+        # unchanged.
+        self.mcgn = None
+        mcgn_ckpt = getattr(args, 'mcgn_ckpt', '') or ''
+        if mcgn_ckpt:
+            try:
+                from sidemodel.sidemodel_verifier import MCGNVerifier
+                self.mcgn = MCGNVerifier(args, ckpt=mcgn_ckpt,
+                                         weight=getattr(args, 'mcgn_weight', 0.5))
+            except Exception as e:
+                print(f"[MAFGS] MCGN side model unavailable ({e}); "
+                      f"continuing with analytic guidance only.")
+                self.mcgn = None
 
     def update_env(self, env):
         self.clear.update_env(env)
         self.field.update_env(env)
+        if self.mcgn is not None:
+            self.mcgn.update_env(env)
 
     def get_guidance(self, x, return_logp=False, **kwargs):
         lc = self.clear.get_guidance(x, return_logp=return_logp, **kwargs)
         lf = self.field.get_guidance(x, return_logp=return_logp, **kwargs)
-        return self.w_clear * lc + self.w_field * lf
+        g = self.w_clear * lc + self.w_field * lf
+        if self.mcgn is not None:
+            g = g + self.mcgn.get_guidance(x, return_logp=return_logp, **kwargs)
+        return g
 
     def acceptance_logp(self, x, **kwargs):
         """Clearance-only logprob for the DFS soft threshold. The goal-field's

@@ -87,4 +87,7 @@ class Arguments:
     mafgs_collision_tol: float = field(default=0.05) # feasibility gate: max summed clearance loss
     mafgs_stall_tol: float = field(default=0.10)     # feasibility gate: max stalled-progress
     mafgs_deadend_tol: float = field(default=0.15)   # feasibility gate: max dead-end occupancy
+    # Optional learned map-conditioned side model (MCGN); empty ckpt = disabled
+    mcgn_ckpt: str = field(default='')               # path to trained MCGN checkpoint (.pt)
+    mcgn_weight: float = field(default=0.5)           # weight of MCGN alignment term in guidance
 
