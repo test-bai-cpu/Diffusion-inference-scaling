@@ -23,6 +23,9 @@ def main(dataset: str="pointmaze-giant-navigate-v0", method: str='dfs', device: 
     args.dist_weight = dist_weight
     args_grid = get_args(args)
 
+    import csv, os as _os
+    METRIC_COLS = ['total_reward', 'success', 'collision_rate', 'cornercut_rate',
+                   'deadend_frac', 'stalled_prog', 'final_gap', 'steps', 'compute']
     for args in args_grid:
         pipe = get_pipe(args)
         returns = pipe.experiment()
@@ -33,6 +36,29 @@ def main(dataset: str="pointmaze-giant-navigate-v0", method: str='dfs', device: 
         run_str = args.version if args.version else args.method
         with open(output_file, 'a') as f:
             f.write(f"Maze: {args.dataset} | Run: {run_str} | Compute: {average_compute} | Success Rate: {success_rate}\n")
+
+        # ---- detailed per-task metrics CSV (success separated from failure modes) ----
+        detailed_file = 'results_detailed.csv'
+        write_header = not _os.path.exists(detailed_file)
+        tasks = [t for t in returns.keys() if t != 'average']
+        with open(detailed_file, 'a', newline='') as f:
+            w = csv.writer(f)
+            if write_header:
+                w.writerow(['dataset', 'method', 'run', 'maze_json_dir',
+                            'maze_variant_idx', 'task'] + METRIC_COLS)
+            for task_id in tasks:
+                r = returns[task_id]
+                row = [args.dataset, args.method, run_str,
+                       getattr(args, 'maze_json_dir', ''),
+                       getattr(args, 'maze_variant_idx', 0), task_id]
+                row += [r.get(c, '') for c in METRIC_COLS]
+                w.writerow(row)
+            # average row
+            a = returns['average']
+            w.writerow([args.dataset, args.method, run_str,
+                        getattr(args, 'maze_json_dir', ''),
+                        getattr(args, 'maze_variant_idx', 0), 'average']
+                       + [a.get(c, '') for c in METRIC_COLS])
 
 
 if __name__ == "__main__":
