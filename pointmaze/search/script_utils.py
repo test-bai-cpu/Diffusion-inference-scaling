@@ -2,6 +2,7 @@ from search.configs import Arguments
 from search.search_policy import SearchPolicy
 from search.methods.bfs import BFSGuidance
 from search.methods.dfs import DFSGuidance
+from search.methods.mafgs import MAFGSGuidance
 from search.base_pipeline import BasePipe
 from copy import deepcopy
 from typing import List
@@ -10,6 +11,8 @@ from typing import List
 def get_pipe(args: Arguments) -> BasePipe:
     if args.method == 'dfs':
         guidance = DFSGuidance(args=args)
+    elif 'mafgs' in args.method:
+        guidance = MAFGSGuidance(args=args)
     elif 'bfs' in args.method or 'bon' in args.method:
         guidance = BFSGuidance(args=args)
     else:
@@ -44,6 +47,21 @@ def get_args(args: Arguments) -> List[Arguments]:
             for particles in [4, 8, 16, ]:
                 cur_args = deepcopy(args)
                 cur_args.per_sample_batch_size = particles
+                args_grid.append(cur_args)
+            return args_grid
+        elif 'mafgs' in args.method:
+            # Map-Aware Feasibility-Guided Search: DFS-style budgeted backtracking
+            # driven by a map-aware composite (clearance + goal-distance field) and
+            # a hard feasibility gate (corner-cut / collision / stalled-progress).
+            args.per_sample_batch_size = 1
+            args.step_size = 1
+            args.threshold_schedule = 'increase'
+            for (depth, budget, threshold) in [(12, 20, 6)]:
+                cur_args = deepcopy(args)
+                cur_args.budget = budget
+                cur_args.threshold = threshold
+                cur_args.recur_depth = depth
+                cur_args.start_step = depth
                 args_grid.append(cur_args)
             return args_grid
         elif 'dfs' in args.method:
@@ -83,6 +101,21 @@ def get_args(args: Arguments) -> List[Arguments]:
             for particles in [4, 8, 16]:
                 cur_args = deepcopy(args)
                 cur_args.per_sample_batch_size = particles
+                args_grid.append(cur_args)
+            return args_grid
+        elif 'mafgs' in args.method:
+            # Map-Aware Feasibility-Guided Search: DFS-style budgeted backtracking
+            # driven by a map-aware composite (clearance + goal-distance field) and
+            # a hard feasibility gate (corner-cut / collision / stalled-progress).
+            args.per_sample_batch_size = 1
+            args.step_size = 1
+            args.threshold_schedule = 'increase'
+            for (depth, budget, threshold) in [(12, 20, 6)]:
+                cur_args = deepcopy(args)
+                cur_args.budget = budget
+                cur_args.threshold = threshold
+                cur_args.recur_depth = depth
+                cur_args.start_step = depth
                 args_grid.append(cur_args)
             return args_grid
         elif 'dfs' in args.method:

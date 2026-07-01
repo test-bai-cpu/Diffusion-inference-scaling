@@ -76,3 +76,15 @@ class Arguments:
     maze_weight: float = field(default=1.0)          # weight of MazeVerifier in composite
     dist_weight: float = field(default=1.0)          # weight of DistanceFieldVerifier in composite
 
+    # MAFGS: Map-Aware Feasibility-Guided Search
+    mafgs_clear_weight: float = field(default=1.0)   # clearance verifier weight in guidance
+    mafgs_field_weight: float = field(default=0.5)   # goal-distance-field weight in guidance
+    mafgs_margin: float = field(default=0.7)         # clearance hinge margin (< corridor half-width 2.0)
+    mafgs_ball_radius: float = field(default=0.5)    # wall inflation = point-mass radius
+    mafgs_n_sub: int = field(default=4)              # segment supersampling between waypoints
+    mafgs_corner_radius: float = field(default=0.9)  # diagonal-pinch penalty radius
+    mafgs_corner_weight: float = field(default=1.0)  # diagonal-pinch penalty weight
+    mafgs_collision_tol: float = field(default=0.05) # feasibility gate: max summed clearance loss
+    mafgs_stall_tol: float = field(default=0.10)     # feasibility gate: max stalled-progress
+    mafgs_deadend_tol: float = field(default=0.15)   # feasibility gate: max dead-end occupancy
+
