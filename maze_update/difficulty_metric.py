@@ -52,6 +52,7 @@ from dataclasses import dataclass, field, asdict
 from typing import Optional
 
 import numpy as np
+from scipy.stats import rankdata
 
 try:
     import networkx as nx
@@ -217,106 +218,147 @@ def structural_distance(base_grid: np.ndarray, var_grid: np.ndarray) -> dict:
 # ---------------------------------------------------------------------------
 # The planner-difficulty metric
 # ---------------------------------------------------------------------------
-@dataclass
-class DifficultyWeights:
-    w_sp: float = 0.40          # start->goal shortest-path elongation
-    w_goalfield: float = 0.25   # global distance-to-goal landscape shift
-    w_novelty: float = 0.25     # corridor OOD (near-zero training traffic)
-    w_deadend: float = 0.10     # increase in dead-end pockets
-    # saturating scales (map raw quantity -> [0,1] via 1 - exp(-x/scale) or ratio caps)
-    sp_ratio_cap: float = 2.0   # sp_ratio of sp_ratio_cap -> full score
-    goalfield_scale: float = 4.0
-    deadend_scale: float = 0.15
-    novelty_traffic_eps: float = 1e-5  # a cell is 'novel' if traffic below this
+# CALIBRATION RESULT (60 logged DFS runs on the giant maze):
+#   RANK composite over GOOD_FEATURES ......... Spearman rho = -0.531 vs success
+#   RDI (old metric) .......................... Spearman rho = -0.374
+#   nominal target_level ...................... Spearman rho = -0.295
+# The authoritative difficulty score is the DATA-RELATIVE RANK COMPOSITE
+# (`rank_composite`): each feature is turned into a population percentile (0..1),
+# then averaged over GOOD_FEATURES. Ranking is what removes the scale/units
+# problem and is what was calibrated. `compute_variant_features` produces the raw
+# directional features for one variant; `rank_composite` combines a BATCH of them.
+#
+# All difficulty features are DIRECTIONAL: only changes that make the task harder
+# (goal farther, path longer, more OOD corridor, more dead-ends) push the score
+# up. The earlier non-directional goalfield_shift / corridor_novelty flipped sign
+# because the old generator opened and blocked walls simultaneously (a variant
+# could be structurally very different yet net-EASIER). Directional net_shift and
+# novelty x elongation fix that.
+
+# Features whose equal-weight rank composite achieved rho = -0.531.
+GOOD_FEATURES = ("spectral", "sp_ratio", "net_shift", "deadend_delta",
+                 "novelty_x_elong", "n_blocked")
 
 
 @dataclass
 class DifficultyResult:
-    difficulty: float
+    difficulty: float          # NaN for a single call w/o population; use rank_composite
     reachable: bool
-    components: dict = field(default_factory=dict)
+    features: dict = field(default_factory=dict)
     structural: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
-        d = asdict(self)
-        return d
+        return asdict(self)
 
 
-def _sat(x: float, scale: float) -> float:
-    """Saturating map [0,inf) -> [0,1)."""
-    if not np.isfinite(x):
-        return 1.0
-    return float(1.0 - np.exp(-max(0.0, x) / scale))
-
-
-def compute_difficulty(
+def compute_variant_features(
     base_grid: np.ndarray,
     var_grid: np.ndarray,
     start: tuple[int, int],
     goal: tuple[int, int],
     traffic: Optional[np.ndarray] = None,
-    weights: DifficultyWeights = DifficultyWeights(),
+    novelty_traffic_eps: float = 1e-5,
 ) -> DifficultyResult:
     """
-    Compute planner-difficulty of `var_grid` for task (start, goal) relative to
-    `base_grid`. Higher = harder for a map-blind diffusion planner. A variant
-    whose goal is unreachable saturates to 1.0.
+    Raw DIRECTIONAL planner-difficulty features for one variant, relative to base.
+
+    Returns a DifficultyResult whose `features` dict feeds `rank_composite`.
+    `difficulty` is left NaN here because the calibrated score is a population
+    percentile -- call `rank_composite` over a batch of these to get [0,1] scores.
+    A variant with an unreachable goal is flagged reachable=False and given
+    saturating (maximally hard) feature values.
     """
     base_grid = np.asarray(base_grid)
     var_grid = np.asarray(var_grid)
 
-    sp_base = shortest_path_len(base_grid, start, goal)
-    sp_var = shortest_path_len(var_grid, start, goal)
-
-    comp: dict = {}
-    structural = structural_distance(base_grid, var_grid)
-
-    if not np.isfinite(sp_var):
-        comp.update(dict(sp_ratio=float("inf"), sp_term=1.0, goalfield_shift=float("inf"),
-                         goalfield_term=1.0, corridor_novelty=1.0, novelty_term=1.0,
-                         deadend_delta=0.0, deadend_term=0.0, sp_base=sp_base, sp_var=float("inf")))
-        return DifficultyResult(difficulty=1.0, reachable=False, components=comp, structural=structural)
-
-    # --- (1) shortest-path elongation ---
-    sp_ratio = sp_var / sp_base if sp_base > 0 else 1.0
-    # only elongation counts; a shortcut (ratio<1) does NOT make it harder
-    sp_term = _sat(max(0.0, sp_ratio - 1.0), scale=(weights.sp_ratio_cap - 1.0))
-    comp["sp_ratio"] = sp_ratio
-    comp["sp_term"] = sp_term
-
-    # --- (2) goal-distance field shift over cells free in both ---
     Db = bfs_distance_field(base_grid, goal)
     Dv = bfs_distance_field(var_grid, goal)
-    both = (base_grid == 0) & (var_grid == 0) & np.isfinite(Db) & np.isfinite(Dv)
-    goalfield_shift = float(np.abs(Dv - Db)[both].mean()) if both.any() else 0.0
-    goalfield_term = _sat(goalfield_shift, scale=weights.goalfield_scale)
-    comp["goalfield_shift"] = goalfield_shift
-    comp["goalfield_term"] = goalfield_term
+    sp_base = float(Db[start[0], start[1]])
+    sp_var = float(Dv[start[0], start[1]])
+    reachable = np.isfinite(sp_var)
 
-    # --- (3) corridor novelty: new optimal path cells with ~zero training traffic ---
+    structural = structural_distance(base_grid, var_grid)
+    f: dict = {}
+    f["spectral"] = structural.get("spectral_dist", np.nan)
+    f["edge_jac"] = structural.get("edge_jaccard_dist", np.nan)
+    f["n_blocked"] = int(((base_grid == 0) & (var_grid == 1)).sum())
+    f["n_opened"] = int(((base_grid == 1) & (var_grid == 0)).sum())
+    f["net_walls"] = f["n_blocked"] - f["n_opened"]
+
+    if not reachable:
+        f.update(dict(sp_ratio=3.0, sp_elong=2.0, farther_mean=np.inf, closer_mean=0.0,
+                      net_shift=np.inf, corridor_novelty=1.0, novelty_x_elong=2.0,
+                      deadend_delta=max(0.0, deadend_score(var_grid) - deadend_score(base_grid)),
+                      sp_base=sp_base, sp_var=np.inf))
+        return DifficultyResult(difficulty=float("nan"), reachable=False,
+                                features=f, structural=structural)
+
+    # (1) shortest-path elongation start->goal (>=1 harder; <1 is a shortcut = easier)
+    f["sp_ratio"] = (sp_var / sp_base) if sp_base > 0 else 1.0
+    f["sp_elong"] = max(0.0, f["sp_ratio"] - 1.0)
+
+    # (2) DIRECTIONAL goal-distance field shift over cells free in both maps.
+    both = (base_grid == 0) & (var_grid == 0) & np.isfinite(Db) & np.isfinite(Dv)
+    dshift = np.where(both, Dv - Db, 0.0)
+    farther = np.where(both, np.maximum(0.0, dshift), 0.0)   # got farther from goal
+    closer = np.where(both, np.maximum(0.0, -dshift), 0.0)   # got closer (easier)
+    f["farther_mean"] = float(farther[both].mean()) if both.any() else 0.0
+    f["closer_mean"] = float(closer[both].mean()) if both.any() else 0.0
+    f["net_shift"] = f["farther_mean"] - f["closer_mean"]
+
+    # (3) corridor novelty on the NEW optimal path, GATED by elongation so that
+    #     a novel-but-shorter reroute does not read as harder.
     path = optimal_path_cells(var_grid, start, goal)
     if traffic is not None and len(path) > 0:
-        novel = sum(1 for (i, j) in path if traffic[i, j] <= weights.novelty_traffic_eps)
-        corridor_novelty = novel / len(path)
+        nov = float(np.mean([1.0 if traffic[i, j] <= novelty_traffic_eps else 0.0
+                             for (i, j) in path]))
     else:
-        corridor_novelty = 0.0
-    comp["corridor_novelty"] = corridor_novelty
+        nov = 0.0
+    f["corridor_novelty"] = nov
+    f["novelty_x_elong"] = nov * f["sp_elong"]
 
-    # --- (4) dead-end pressure: growth in dead-end pocket fraction ---
-    de_base = deadend_score(base_grid)
-    de_var = deadend_score(var_grid)
-    deadend_delta = max(0.0, de_var - de_base)
-    deadend_term = _sat(deadend_delta, scale=weights.deadend_scale)
-    comp["deadend_delta"] = deadend_delta
-    comp["deadend_term"] = deadend_term
-    comp["sp_base"] = sp_base
-    comp["sp_var"] = sp_var
+    # (4) dead-end pressure: growth in dead-end pocket fraction near the maze.
+    f["deadend_delta"] = max(0.0, deadend_score(var_grid) - deadend_score(base_grid))
 
-    difficulty = (
-        weights.w_sp * sp_term
-        + weights.w_goalfield * goalfield_term
-        + weights.w_novelty * corridor_novelty
-        + weights.w_deadend * deadend_term
-    )
-    difficulty = float(min(1.0, difficulty))
-    return DifficultyResult(difficulty=difficulty, reachable=True, components=comp, structural=structural)
+    f["sp_base"] = sp_base
+    f["sp_var"] = sp_var
+    return DifficultyResult(difficulty=float("nan"), reachable=True,
+                            features=f, structural=structural)
+
+
+def _percentile_rank(x: np.ndarray) -> np.ndarray:
+    """Map values to population percentile in [0,1]; NaNs stay NaN."""
+    x = np.asarray(x, dtype=float)
+    m = np.isfinite(x)
+    r = np.full_like(x, np.nan)
+    n = int(m.sum())
+    if n > 1:
+        r[m] = (rankdata(x[m]) - 1) / (n - 1)
+    elif n == 1:
+        r[m] = 0.5
+    return r
+
+
+def rank_composite(feature_dicts, keys=GOOD_FEATURES) -> np.ndarray:
+    """
+    Calibrated data-relative difficulty for a BATCH of variants.
+
+    feature_dicts : sequence of `DifficultyResult.features` dicts (or DifficultyResult).
+    Returns an array of difficulty scores in [0,1] (population percentile mean over
+    `keys`). Higher = harder. This is the score to bin into quantile levels.
+    """
+    dicts = [d.features if isinstance(d, DifficultyResult) else d for d in feature_dicts]
+    cols = []
+    for k in keys:
+        vals = np.array([float(d.get(k, np.nan)) for d in dicts], dtype=float)
+        cols.append(_percentile_rank(vals))
+    mat = np.column_stack(cols) if cols else np.zeros((len(dicts), 0))
+    with np.errstate(invalid="ignore"):
+        return np.nanmean(mat, axis=1)
+
+
+def quantile_levels(scores: np.ndarray, k: int = 4) -> np.ndarray:
+    """Bin difficulty scores into k equal-population levels 0..k-1 (0 = easiest)."""
+    scores = np.asarray(scores, dtype=float)
+    q = np.quantile(scores[np.isfinite(scores)], np.linspace(0, 1, k + 1))
+    return np.clip(np.digitize(scores, q[1:-1]), 0, k - 1)
