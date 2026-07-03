@@ -49,7 +49,7 @@ import os
 METRIC_COLS = ['total_reward', 'success', 'collision_rate', 'cornercut_rate',
                'deadend_frac', 'stalled_prog', 'final_gap', 'steps', 'compute']
 BOOK_COLS = ['dataset', 'method', 'config', 'task', 'level', 'variant_idx',
-             'difficulty', 'seed']
+             'difficulty_score', 'seed']
 
 
 # The four evaluation configurations. `config` is the display label; `method` is
@@ -72,7 +72,7 @@ def level_variants(maze_json_dir, task, levels):
     d = json.load(open(path))
     by_level = {}
     for k, v in enumerate(d['variants']):
-        by_level.setdefault(v['level_index'], []).append((k, float(v['difficulty'])))
+        by_level.setdefault(v['level_index'], []).append((k, float(v['difficulty_score'])))
     out = []
     for L in levels:
         if L in by_level:

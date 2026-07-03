@@ -126,7 +126,7 @@ def test_run_writes_csv():
         rows = list(csv.DictReader(f))
     # 2 methods x 1 task x 2 levels x 1 variant x 2 seeds = 8 rows
     check("row count = 8", len(rows) == 8, str(len(rows)))
-    check("has book+metric columns", 'difficulty' in rows[0] and 'success' in rows[0]
+    check("has book+metric columns", 'difficulty_score' in rows[0] and 'success' in rows[0]
           and 'level' in rows[0])
     check("levels present", sorted({r['level'] for r in rows}) == ['0', '1'])
     check("both configs present", {r['config'] for r in rows} == {'dfs', 'mafgs'})
@@ -138,7 +138,7 @@ def test_plot_degradation():
     td = tempfile.mkdtemp()
     csvp = os.path.join(td, 'eval_results.csv')
     BOOK = ['dataset', 'method', 'config', 'task', 'level', 'variant_idx',
-            'difficulty', 'seed']
+            'difficulty_score', 'seed']
     MET = ['total_reward', 'success', 'collision_rate', 'cornercut_rate',
            'deadend_frac', 'stalled_prog', 'final_gap', 'steps', 'compute']
     rng = np.random.default_rng(0)
