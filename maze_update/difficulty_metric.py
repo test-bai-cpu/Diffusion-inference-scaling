@@ -2,20 +2,7 @@
 difficulty_metric.py
 ====================
 
-Calibrated, data-aware difficulty metric for maze variants.
-
-Motivation
-----------
-The previous generator graded variants by the Reroute Disruption Index (RDI),
-a *symmetric graph-edit* style score (how many diverse routes an edit breaks,
-spatial detour, traffic on broken routes). On the 60 logged DFS runs, RDI
-rank-correlates with measured success at only Spearman rho = -0.295, with 20%
-of level-pairs inverted (a "harder" level solved more often than an "easier"
-one). The reason: a diffusion planner trained on ONE map fails from
-*distributional shift* and *task-relative geometry*, not from how many training
-routes an edit happens to intersect.
-
-This module separates two axes that RDI conflated:
+This module separates two axes:
 
   1. PLANNER DIFFICULTY (asymmetric, task- and data-relative) -- predicts
      whether the diffusion planner will struggle. Built from:
@@ -26,9 +13,6 @@ This module separates two axes that RDI conflated:
                            both, where D is the BFS distance-to-goal field. How
                            much the whole distance-to-goal landscape moved --
                            exactly the field the guidance method descends on.
-       * corridor_novelty: fraction of the NEW optimal path's cells that carry
-                           near-zero *training* traffic. The out-of-distribution
-                           term -- the planner has never seen these corridors.
        * deadend_pressure: growth in number/severity of dead-end pockets the
                            agent can wander into near the optimal corridor.
 
@@ -38,11 +22,10 @@ This module separates two axes that RDI conflated:
      Use this to make the stronger paper claim: a variant is both structurally
      distant AND harder.
 
-Coordinate convention (verified against ogbench/locomaze/maze.py and the
-variant JSONs): world xy = (j*maze_unit - offset, i*maze_unit - offset) with
+Coordinate: world xy = (j*maze_unit - offset, i*maze_unit - offset) with
 maze_unit = 4, offset = 4. So cell (i, j): x = j*4 - 4, y = i*4 - 4.
 
-Grid convention: 0 = free, 1 = wall (ogbench).
+Grid: 0 = free, 1 = wall (ogbench).
 """
 
 from __future__ import annotations
@@ -235,14 +218,20 @@ def structural_distance(base_grid: np.ndarray, var_grid: np.ndarray) -> dict:
 # could be structurally very different yet net-EASIER). Directional net_shift and
 # novelty x elongation fix that.
 
-# Features whose equal-weight rank composite achieved rho = -0.531.
+# Directional + structural features whose equal-weight rank composite defines
+# difficulty. corridor_novelty / novelty_x_elong were REMOVED: on this fully
+# demonstrated giant maze every original corridor carries training traffic well
+# above novelty_traffic_eps, so the term only ever counted freshly-opened wall
+# cells on the path (nearly redundant with n_opened) and showed ~0 correlation
+# with difficulty. corridor_novelty is still computed and written to the JSON
+# for reporting, but no longer feeds the difficulty ranking.
 GOOD_FEATURES = ("spectral", "sp_ratio", "net_shift", "deadend_delta",
-                 "novelty_x_elong", "n_blocked")
+                 "n_blocked")
 
 
 @dataclass
 class DifficultyResult:
-    difficulty: float          # NaN for a single call w/o population; use rank_composite
+    difficulty_score: float    # NaN for a single call w/o population; use rank_composite
     reachable: bool
     features: dict = field(default_factory=dict)
     structural: dict = field(default_factory=dict)
@@ -290,7 +279,7 @@ def compute_variant_features(
                       net_shift=np.inf, corridor_novelty=1.0, novelty_x_elong=2.0,
                       deadend_delta=max(0.0, deadend_score(var_grid) - deadend_score(base_grid)),
                       sp_base=sp_base, sp_var=np.inf))
-        return DifficultyResult(difficulty=float("nan"), reachable=False,
+        return DifficultyResult(difficulty_score=float("nan"), reachable=False,
                                 features=f, structural=structural)
 
     # (1) shortest-path elongation start->goal (>=1 harder; <1 is a shortcut = easier)
@@ -299,7 +288,7 @@ def compute_variant_features(
 
     # (2) DIRECTIONAL goal-distance field shift over cells free in both maps.
     both = (base_grid == 0) & (var_grid == 0) & np.isfinite(Db) & np.isfinite(Dv)
-    dshift = np.where(both, Dv - Db, 0.0)
+    dshift = np.where(both, np.where(both, Dv, 0.0) - np.where(both, Db, 0.0), 0.0)
     farther = np.where(both, np.maximum(0.0, dshift), 0.0)   # got farther from goal
     closer = np.where(both, np.maximum(0.0, -dshift), 0.0)   # got closer (easier)
     f["farther_mean"] = float(farther[both].mean()) if both.any() else 0.0
@@ -322,7 +311,7 @@ def compute_variant_features(
 
     f["sp_base"] = sp_base
     f["sp_var"] = sp_var
-    return DifficultyResult(difficulty=float("nan"), reachable=True,
+    return DifficultyResult(difficulty_score=float("nan"), reachable=True,
                             features=f, structural=structural)
 
 
