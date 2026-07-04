@@ -2,7 +2,7 @@ from search.configs import Arguments
 from search.script_utils import get_pipe, get_args
 
 def main(dataset: str="pointmaze-giant-navigate-v0", method: str='dfs', device: str="cuda:7", version: str='',
-         task=None, maze_json_dir: str='', maze_variant_idx: int=0,
+         task=None, maze_json_dir: str='', maze_variant_idx: int=0, run_tag: str='',
          use_distance_field: bool=False, dist_omega: float=1.0, dist_mode: str='sum',
          dist_smooth_sigma: float=0.5, dist_connectivity: int=4,
          maze_weight: float=1.0, dist_weight: float=1.0):
@@ -14,6 +14,7 @@ def main(dataset: str="pointmaze-giant-navigate-v0", method: str='dfs', device: 
     args.task = task if task is not None else [1, 2, 3, 4, 5]
     args.maze_json_dir = maze_json_dir
     args.maze_variant_idx = maze_variant_idx
+    args.run_tag = run_tag
     args.use_distance_field = use_distance_field
     args.dist_omega = dist_omega
     args.dist_mode = dist_mode
@@ -23,16 +24,43 @@ def main(dataset: str="pointmaze-giant-navigate-v0", method: str='dfs', device: 
     args.dist_weight = dist_weight
     args_grid = get_args(args)
 
+    import csv, os as _os
+    METRIC_COLS = ['total_reward', 'success', 'collision_rate', 'cornercut_rate',
+                   'deadend_frac', 'stalled_prog', 'final_gap', 'steps', 'compute']
     for args in args_grid:
         pipe = get_pipe(args)
         returns = pipe.experiment()
         success_rate = returns['average']['total_reward']
         average_compute = returns['average']['compute']
         print(f"Success Rate: {success_rate}, Average Compute: {average_compute}")
-        output_file = f'results_{args.method}_{args.dataset}.txt'
+        _tag = f'_{args.run_tag}' if getattr(args, 'run_tag', '') else ''
+        output_file = f'results_{args.method}_{args.dataset}{_tag}.txt'
         run_str = args.version if args.version else args.method
         with open(output_file, 'a') as f:
             f.write(f"Maze: {args.dataset} | Run: {run_str} | Compute: {average_compute} | Success Rate: {success_rate}\n")
+
+        # ---- detailed per-task metrics CSV (success separated from failure modes) ----
+        detailed_file = f'results_detailed{_tag}.csv'
+        write_header = not _os.path.exists(detailed_file)
+        tasks = [t for t in returns.keys() if t != 'average']
+        with open(detailed_file, 'a', newline='') as f:
+            w = csv.writer(f)
+            if write_header:
+                w.writerow(['dataset', 'method', 'run', 'maze_json_dir',
+                            'maze_variant_idx', 'task'] + METRIC_COLS)
+            for task_id in tasks:
+                r = returns[task_id]
+                row = [args.dataset, args.method, run_str,
+                       getattr(args, 'maze_json_dir', ''),
+                       getattr(args, 'maze_variant_idx', 0), task_id]
+                row += [r.get(c, '') for c in METRIC_COLS]
+                w.writerow(row)
+            # average row
+            a = returns['average']
+            w.writerow([args.dataset, args.method, run_str,
+                        getattr(args, 'maze_json_dir', ''),
+                        getattr(args, 'maze_variant_idx', 0), 'average']
+                       + [a.get(c, '') for c in METRIC_COLS])
 
 
 if __name__ == "__main__":
@@ -56,6 +84,10 @@ if __name__ == "__main__":
                         type=str,
                         default='',
                         help='Optional version tag (e.g. ada) shown in results and folder names.')
+    parser.add_argument('--run_tag',
+                        type=str,
+                        default='',
+                        help='Optional label appended to the results txt filename (e.g. mazev2 -> results_dfs_<dataset>_mazev2.txt). All runs still append to this one file.')
     parser.add_argument('--task',
                         type=int,
                         nargs='+',
@@ -100,6 +132,7 @@ if __name__ == "__main__":
     main(dataset=cli_args.dataset, method=cli_args.method, device=cli_args.device, version=cli_args.version,
          task=cli_args.task,
          maze_json_dir=cli_args.maze_json_dir, maze_variant_idx=cli_args.maze_variant_idx,
+         run_tag=cli_args.run_tag,
          use_distance_field=cli_args.use_distance_field,
          dist_omega=cli_args.dist_omega,
          dist_mode=cli_args.dist_mode,

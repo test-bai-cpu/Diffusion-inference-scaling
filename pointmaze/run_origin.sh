@@ -16,7 +16,8 @@ for task in 1 2 3 4 5; do
         --maze_json_dir ../maze_update/maze_variants_v2 \
         --maze_variant_idx "${maze_variant_idx}" \
         --version "mazev2_${method}-task${task}-level${level}-variant$((v+1))" \
-        --task "${task}"
+        --task "${task}" \
+        --run_tag mazev2
     done
   done
 done

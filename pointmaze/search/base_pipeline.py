@@ -149,6 +149,28 @@ class BasePipe:
         json.dump(json_data, open(json_path, 'w'), indent=2, sort_keys=True)
         extras['total_reward'] = total_reward
 
+        # ---- per-episode instrumentation (separate success from failure modes) ----
+        # Guarded so a geometry hiccup never breaks the run; adds rate metrics to
+        # extras, which eval() averages (x100) into percentages automatically.
+        if 'pointmaze' in args.dataset:
+            try:
+                from search.episode_metrics import score_episode, xy_to_ij
+                mu = env._maze_unit; ox = env._offset_x; oy = env._offset_y
+                gx, gy = env.cur_task_info['goal_xy']
+                goal_ij = xy_to_ij(gx, gy, mu, ox, oy)
+                sx, sy = rollout[0][:2]
+                start_ij = xy_to_ij(sx, sy, mu, ox, oy)
+                mets = score_episode(np.array(rollout), env.maze_map, goal_ij,
+                                     mu, ox, oy, total_reward=total_reward,
+                                     terminal=terminal, start_ij=start_ij)
+                # keep 'success' aligned with the paper's total_reward-based rate
+                mets['success'] = float(total_reward > 0)
+                for k, v in mets.items():
+                    if k != 'total_reward' and np.isfinite(v):
+                        extras[k] = v
+            except Exception as e:
+                print(f"[episode_metrics] skipped: {e}")
+
         return extras
 
 
@@ -191,7 +213,8 @@ class BasePipe:
         version = getattr(self.args, 'version', '')
         use_json = bool(getattr(self.args, 'maze_json_dir', ''))
         run_tag = version if version else time.strftime("%Y-%m-%d-%H:%M:%S", time.localtime())
-        path = f"{self.args.logging_dir}/{self.args.dataset}/inference/{exp_name}/{run_tag}/"
+        _dstag = f"_{self.args.run_tag}" if getattr(self.args, 'run_tag', '') else ''
+        path = f"{self.args.logging_dir}/{self.args.dataset}{_dstag}/inference/{exp_name}/{run_tag}/"
         os.makedirs(path, exist_ok=True)
         with open(join(path, 'args.json'), 'w') as f:
             json.dump(vars(self.args), f, indent=2, sort_keys=True)

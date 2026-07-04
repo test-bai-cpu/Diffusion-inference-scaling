@@ -7,7 +7,7 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --gpus-per-node=1
 #SBATCH --mem=48g
-#SBATCH --time=18:00:00
+#SBATCH --time=40:00:00
 #SBATCH --constraint="projects"
 #SBATCH -e slurm-%j.err
 #SBATCH -o slurm-%j.out
