@@ -371,7 +371,7 @@ def main():
     ap.add_argument("--n-variants", type=int, default=3)
     ap.add_argument("--pool-per-budget", type=int, default=40)
     ap.add_argument("--max-block", type=int, default=8)
-    ap.add_argument("--max-open", type=int, default=2,
+    ap.add_argument("--max-open", type=int, default=4,
                     help="max interior walls a candidate may open (0 = block-only)")
     ap.add_argument("--out", default=os.path.join(HERE, "maze_variants_v2"))
     ap.add_argument("--ladder-png", default=os.path.join(HERE, "variant_ladder.png"))

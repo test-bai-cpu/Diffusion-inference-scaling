@@ -5,6 +5,7 @@ The code is based on [diffuser](https://github.com/jannerm/diffuser) and the maz
 First install the dependencies in `requirements.txt`, then install ogbench with our added PointMaze Ultra environment. 
 ```bash
 conda create -n maze python=3.10
+conda activate maze
 pip install -r requirements.txt
 cd ogbench
 pip install -e .
