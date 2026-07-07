@@ -6,9 +6,6 @@ for task in 1 2 3 4 5; do
   for level_idx in 0 1 2 3; do
     level=$((level_idx + 1))
     for v in 0 1 2; do
-        echo "Skipping task ${task}, level ${level}, variant $((v+1))"
-        continue
-
     maze_variant_idx=$((level_idx * 3 + v))
     method="dfs"
     echo "Running task ${task}, level ${level}, maze_variant_idx ${maze_variant_idx} with method ${method}"
