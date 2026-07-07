@@ -21,11 +21,11 @@ for task in 1 2 3 4 5; do
       --method "${method}" \
       --maze_json_dir ../maze_update/maze_variants \
       --maze_variant_idx "${maze_variant_idx}" \
-      --version "mazev1cond_${method}-task${task}-level${level}-variant$((v+1))" \
+      --version "mazev1-trainonv2-cond_${method}-task${task}-level${level}-variant$((v+1))" \
       --task "${task}" \
       --num_samples 40 \
       --use_map_cond \
-      --map_cond_ckpt logs/mapcond-H600/variants_train_giant/state_360000.pt \
+      --map_cond_ckpt logs/mapcond-H600-mazev2/variants_train_giant/state_500000.pt \
       --run_tag mazev1-cond-4 \
       --device cuda \
       --corner_radius_frac 0.25 \
