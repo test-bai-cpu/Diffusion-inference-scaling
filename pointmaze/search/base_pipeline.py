@@ -45,7 +45,28 @@ class BasePipe:
         dataset = diffusion_experiment.dataset
         renderer = diffusion_experiment.renderer
 
-        policy = Policy(diffusion, dataset.normalizer)
+        # ---- opt-in: swap in a MAP-CONDITIONAL generator (mapcond) ----
+        # Default off => the block above is the unchanged repo path. When on, we
+        # replace the map-blind diffusion with one trained on multiple maps and
+        # its own shared normalizer; the env map is bound per task in experiment().
+        self._mapcond_normalizer = None
+        if getattr(self.args, 'use_map_cond', False):
+            from mapcond.inference import load_mapcond_diffusion
+            ckpt = self.args.map_cond_ckpt
+            assert ckpt, "use_map_cond=True requires --map_cond_ckpt <state_*.pt>"
+            mc_diffusion, mc_normalizer, mc_cfg = load_mapcond_diffusion(
+                ckpt, device=self.args.device,
+                use_ema=getattr(self.args, 'map_cond_use_ema', True),
+                horizon=self.args.sampling_horizon,
+            )
+            diffusion = mc_diffusion
+            self._mapcond_normalizer = mc_normalizer
+            print(f"[mapcond] loaded map-conditional generator from {ckpt} "
+                  f"(maps={mc_cfg['maps']}, canvas={mc_cfg['canvas_hw']})")
+
+        # use the map-conditional shared normalizer if we have one
+        _normalizer = self._mapcond_normalizer or dataset.normalizer
+        policy = Policy(diffusion, _normalizer)
 
         #----------------------------------- register attr -----------------------------#
         self.env = env
@@ -206,6 +227,14 @@ class BasePipe:
                 self.env_renderer.env = self.env  # render background from OOD map
                 if self.guidance is not None:
                     self.guidance.update_env(self.env)
+            # ---- opt-in: bind THIS task's map onto the map-conditional unet ----
+            # The map is constant across the episode, so binding once here lets
+            # every unet(x, cond, t) call in guide_step see it -- no search edits.
+            if getattr(self.args, 'use_map_cond', False):
+                from mapcond.inference import bind_env_map
+                grid = bind_env_map(self.env_diffusion.model, self.env)
+                if grid is not None:
+                    print(f"[mapcond] task {task_id}: bound env map grid {grid.shape}")
             total_results = self.eval(self.args.num_samples, path=path, task_id=task_id)
             returns[task_id] = total_results
             result_str = f"Task: {task_id} | Success Rate: {total_results['total_reward']:.2f}"

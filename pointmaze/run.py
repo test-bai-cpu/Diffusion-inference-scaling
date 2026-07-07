@@ -3,9 +3,13 @@ from search.script_utils import get_pipe, get_args
 
 def main(dataset: str="pointmaze-giant-navigate-v0", method: str='dfs', device: str="cuda:7", version: str='',
          task=None, maze_json_dir: str='', maze_variant_idx: int=0, run_tag: str='',
+         num_samples: int=40,
          use_distance_field: bool=False, dist_omega: float=1.0, dist_mode: str='sum',
          dist_smooth_sigma: float=0.5, dist_connectivity: int=4,
-         maze_weight: float=1.0, dist_weight: float=1.0):
+         maze_weight: float=1.0, dist_weight: float=1.0,
+         corner_radius_frac: float=0.30, corner_transition_weight: float=20.0,
+         verifier_monitor: bool=False, verifier_monitor_freq: int=1,
+         use_map_cond: bool=False, map_cond_ckpt: str='', map_cond_use_ema: bool=True):
     args = Arguments()
     args.device = device
     args.dataset = dataset
@@ -15,6 +19,7 @@ def main(dataset: str="pointmaze-giant-navigate-v0", method: str='dfs', device: 
     args.maze_json_dir = maze_json_dir
     args.maze_variant_idx = maze_variant_idx
     args.run_tag = run_tag
+    args.num_samples = num_samples
     args.use_distance_field = use_distance_field
     args.dist_omega = dist_omega
     args.dist_mode = dist_mode
@@ -22,6 +27,13 @@ def main(dataset: str="pointmaze-giant-navigate-v0", method: str='dfs', device: 
     args.dist_connectivity = dist_connectivity
     args.maze_weight = maze_weight
     args.dist_weight = dist_weight
+    args.corner_radius_frac = corner_radius_frac
+    args.corner_transition_weight = corner_transition_weight
+    args.verifier_monitor = verifier_monitor
+    args.verifier_monitor_freq = verifier_monitor_freq
+    args.use_map_cond = use_map_cond
+    args.map_cond_ckpt = map_cond_ckpt
+    args.map_cond_use_ema = map_cond_use_ema
     args_grid = get_args(args)
 
     import csv, os as _os
@@ -101,6 +113,10 @@ if __name__ == "__main__":
                         type=int,
                         default=0,
                         help='Index into the variants list in the JSON file (same index used for all tasks).')
+    parser.add_argument('--num_samples',
+                        type=int,
+                        default=40,
+                        help='Number of DFS/BFS rollouts to run per task. Use 1 for a quick trajectory generation check.')
     
     # BFS distance field guidance
     parser.add_argument('--use_distance_field',
@@ -127,16 +143,46 @@ if __name__ == "__main__":
     parser.add_argument('--dist_weight',
                         type=float, default=1.0,
                         help='Weight of DistanceFieldVerifier in CompositeVerifier.')
+    parser.add_argument('--corner_radius_frac',
+                        type=float, default=0.30,
+                        help='Forbidden-corner radius as a fraction of env._maze_unit. Set 0 to disable.')
+    parser.add_argument('--corner_transition_weight',
+                        type=float, default=20.0,
+                        help='Hard DFS penalty for diagonal free-cell transitions blocked by two corner walls. Set 0 to disable.')
+    parser.add_argument('--verifier_monitor',
+                        action='store_true', default=False,
+                        help='Print DFS verifier wall/transition cost decomposition at accept/reject checks.')
+    parser.add_argument('--verifier_monitor_freq',
+                        type=int, default=1,
+                        help='Print every N DFS verifier checks when --verifier_monitor is set.')
+    parser.add_argument('--use_map_cond',
+                        action='store_true', default=False,
+                        help='Use a map-conditional diffusion checkpoint from mapcond.train_multimap.')
+    parser.add_argument('--map_cond_ckpt',
+                        type=str, default='',
+                        help='Path to a mapcond train_multimap state_*.pt checkpoint.')
+    parser.add_argument('--map_cond_use_ema',
+                        type=lambda x: str(x).lower() in ('1', 'true', 'yes', 'y'),
+                        default=True,
+                        help='Whether to load EMA weights from the mapcond checkpoint.')
     cli_args = parser.parse_args()
 
     main(dataset=cli_args.dataset, method=cli_args.method, device=cli_args.device, version=cli_args.version,
          task=cli_args.task,
          maze_json_dir=cli_args.maze_json_dir, maze_variant_idx=cli_args.maze_variant_idx,
          run_tag=cli_args.run_tag,
+         num_samples=cli_args.num_samples,
          use_distance_field=cli_args.use_distance_field,
          dist_omega=cli_args.dist_omega,
          dist_mode=cli_args.dist_mode,
          dist_smooth_sigma=cli_args.dist_smooth_sigma,
          dist_connectivity=cli_args.dist_connectivity,
          maze_weight=cli_args.maze_weight,
-         dist_weight=cli_args.dist_weight)
+         dist_weight=cli_args.dist_weight,
+         corner_radius_frac=cli_args.corner_radius_frac,
+         corner_transition_weight=cli_args.corner_transition_weight,
+         verifier_monitor=cli_args.verifier_monitor,
+         verifier_monitor_freq=cli_args.verifier_monitor_freq,
+         use_map_cond=cli_args.use_map_cond,
+         map_cond_ckpt=cli_args.map_cond_ckpt,
+         map_cond_use_ema=cli_args.map_cond_use_ema)

@@ -17,6 +17,7 @@ class CompositeVerifier:
         assert len(verifiers) == len(weights), "verifiers and weights must have equal length"
         self.verifiers = verifiers
         self.weights   = weights
+        self.last_stats = {}
 
     def update_env(self, env, **kwargs):
         for v in self.verifiers:
@@ -30,9 +31,15 @@ class CompositeVerifier:
         """
         if return_logp:
             total = None
+            stats = {}
             for v, w in zip(self.verifiers, self.weights):
                 lp = v.get_guidance(x, return_logp=True, **kwargs)
+                name = v.__class__.__name__
+                if hasattr(v, "last_stats"):
+                    stats[name] = dict(v.last_stats)
+                    stats[name]["composite_weight"] = float(w)
                 total = w * lp if total is None else total + w * lp
+            self.last_stats = stats
             if total is None:
                 return torch.zeros(x.shape[0], device=x.device)
             return total

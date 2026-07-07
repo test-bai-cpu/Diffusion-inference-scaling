@@ -38,6 +38,47 @@ class DFSGuidance(BaseGuidance):
     def reset(self, **kwargs):
         self.budget = self.args.budget
         self.buffer = [{} for _ in range(self.args.inference_steps)]
+        self._monitor_count = 0
+
+    def _verifier_stats(self):
+        stats = getattr(self.guider, "last_stats", {})
+        if "MazeVerifier" in stats:
+            return stats["MazeVerifier"]
+        return stats
+
+    def _print_monitor(self, i, t, cost, threshold, accept, forced_best=False):
+        if not getattr(self.args, "verifier_monitor", False):
+            return
+        freq = max(1, int(getattr(self.args, "verifier_monitor_freq", 1)))
+        self._monitor_count += 1
+        if (self._monitor_count - 1) % freq != 0:
+            return
+
+        stats = self._verifier_stats()
+        wall = stats.get("wall_cost_mean", float("nan"))
+        transition = stats.get("corner_transition_mean", float("nan"))
+        transition_raw = stats.get("corner_transition_raw_mean", float("nan"))
+        cell_raw = stats.get("corner_cell_transition_raw_mean", float("nan"))
+        zone_raw = stats.get("corner_zone_transition_raw_mean", float("nan"))
+        wall_hit = stats.get("wall_hit_frac", float("nan"))
+        transition_hit = stats.get("corner_transition_hit_frac", float("nan"))
+        n_corners = stats.get("n_forbidden_corners", -1)
+        radius = stats.get("corner_radius", float("nan"))
+        reason = "forced_best" if forced_best else ("accept" if accept else "reject")
+        print(
+            "[verifier] step=%02d t=%d cost=%.3f threshold=%.3f %s "
+            "budget=%d wall=%.3f "
+            "trans=%.3f raw_trans=%.3f raw_cell=%.1f raw_zone=%.1f "
+            "hit(wall/trans)=%.3f/%.3f "
+            "corners=%s radius=%.3f" % (
+                i, int(t.item()) if hasattr(t, "item") else int(t),
+                float(cost), float(threshold), reason, int(self.budget),
+                float(wall), float(transition), float(transition_raw),
+                float(cell_raw), float(zone_raw), float(wall_hit), float(transition_hit),
+                str(n_corners), float(radius),
+            ),
+            flush=True,
+        )
 
     def guide_step(
             self,
@@ -61,14 +102,21 @@ class DFSGuidance(BaseGuidance):
         accept = True
         if i in self.evaluation_steps():
             self.buffer[i][logprobs.sum().item()] = x_prev
-            if -logprobs.sum() > self.get_threshold(i, alpha_prod_ts, alpha_prod_t_prevs) and self.budget > 0:
+            cost = -logprobs.sum()
+            threshold = self.get_threshold(i, alpha_prod_ts, alpha_prod_t_prevs)
+            forced_best = False
+            if cost > threshold and self.budget > 0:
                 accept = False
                 self.budget -= 1
-            elif -logprobs.sum() > self.get_threshold(i, alpha_prod_ts, alpha_prod_t_prevs) and self.budget == 0:
+            elif cost > threshold and self.budget == 0:
                 accept = True
+                forced_best = True
                 x_prev = self.buffer[i][max(self.buffer[i].keys())] 
             else:
                 accept = True
+            self._print_monitor(i, ts[i], cost.detach().cpu().item(),
+                                threshold.detach().cpu().item(), accept,
+                                forced_best=forced_best)
         
         if accept:
             return x_prev, {"i_next": i + 1}

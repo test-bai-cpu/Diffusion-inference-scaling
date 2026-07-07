@@ -75,4 +75,12 @@ class Arguments:
     dist_connectivity: int = field(default=4)        # 4 or 8
     maze_weight: float = field(default=1.0)          # weight of MazeVerifier in composite
     dist_weight: float = field(default=1.0)          # weight of DistanceFieldVerifier in composite
+    corner_radius_frac: float = field(default=0.30)  # hard forbidden-corner radius as a fraction of maze_unit
+    corner_transition_weight: float = field(default=20.0)  # hard penalty for diagonal free-cell corner cuts
+    verifier_monitor: bool = field(default=False)    # print DFS verifier cost decomposition
+    verifier_monitor_freq: int = field(default=1)    # print every N DFS verifier checks
 
+    # Map-conditional generator (mapcond). Opt-in; default off => unchanged repo.
+    use_map_cond: bool = field(default=False)        # load a map-conditional ckpt and bind the env map
+    map_cond_ckpt: str = field(default='')           # path to a train_multimap state_*.pt checkpoint
+    map_cond_use_ema: bool = field(default=True)     # use EMA weights from the checkpoint
