@@ -26,7 +26,7 @@ for task in 1 2 3 4 5; do
       --num_samples 40 \
       --use_map_cond \
       --map_cond_ckpt logs/mapcond-H600-mazev2/variants_train_giant/state_500000.pt \
-      --run_tag mazev1-cond-4 \
+      --run_tag mazev1-cond-trainonv2 \
       --device cuda \
       --corner_radius_frac 0.25 \
       --corner_transition_weight 20.0 \
