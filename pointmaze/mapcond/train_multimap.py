@@ -69,6 +69,8 @@ def build(args, dataset):
         cond_dim=dataset.observation_dim,
         dim=args.dim,
         dim_mults=tuple(args.dim_mults),
+        pool_size=args.pool_size,
+        cfg_dropout=args.cfg_dropout,
     ).to(args.device)
     diffusion = MapConditionalGaussianDiffusion(
         model,
@@ -119,6 +121,8 @@ def save_ckpt(path, step, model, ema_model, dataset, args):
             "n_diffusion_steps": args.n_diffusion_steps,
             "dim": args.dim,
             "dim_mults": list(args.dim_mults),
+            "pool_size": args.pool_size,
+            "cfg_dropout": args.cfg_dropout,
             "canvas_hw": list(dataset.canvas_hw),
             "pad_anchor": dataset.pad_anchor,
             "transition_dim": dataset.transition_dim,
@@ -250,6 +254,13 @@ def get_args(argv=None):
     p.add_argument("--n_diffusion_steps", type=int, default=256)
     p.add_argument("--dim", type=int, default=32)
     p.add_argument("--dim_mults", nargs="+", type=int, default=[1, 4, 8])
+    p.add_argument("--pool_size", type=int, default=4,
+                   help="MapEncoder spatial pool grid; 1 = original global "
+                        "average pool, 4 = keep 4x4 layout information.")
+    p.add_argument("--cfg_dropout", type=float, default=0.1,
+                   help="Prob. of replacing the map embedding with the learned "
+                        "null embedding during training (classifier-free "
+                        "guidance). 0 disables CFG training.")
     p.add_argument("--n_train_steps", type=int, default=1_000_000)
     p.add_argument("--batch_size", type=int, default=32)
     p.add_argument("--learning_rate", type=float, default=2e-4)

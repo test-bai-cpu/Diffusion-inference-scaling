@@ -39,7 +39,30 @@ from mapcond.models import (
 from mapcond import maze_grids as MG
 
 
-def load_mapcond_diffusion(ckpt_path, device="cpu", use_ema=True, horizon=None):
+def _infer_encoder_geometry(state):
+    """
+    Recover (pool_size, has_null_emb) from a state dict, so checkpoints saved
+    BEFORE pool_size/cfg_dropout existed in the config still load correctly
+    (they were trained with pool_size=1 and no null embedding).
+    """
+    hidden = None
+    in_feat = None
+    has_null = False
+    for k, v in state.items():
+        if k.endswith("map_encoder.conv.0.weight"):
+            hidden = v.shape[0]
+        elif k.endswith("map_encoder.head.0.weight"):
+            in_feat = v.shape[1]
+        elif k.endswith("null_map_emb"):
+            has_null = True
+    if hidden is None or in_feat is None:
+        return 1, has_null
+    pool_sq = in_feat // (hidden * 2)
+    return int(round(pool_sq ** 0.5)), has_null
+
+
+def load_mapcond_diffusion(ckpt_path, device="cpu", use_ema=True, horizon=None,
+                           guidance_scale=0.0):
     """
     Rebuild a map-conditional diffusion model from a train_multimap checkpoint.
 
@@ -52,12 +75,19 @@ def load_mapcond_diffusion(ckpt_path, device="cpu", use_ema=True, horizon=None):
     cfg = ckpt["config"]
     normalizer = pickle.loads(ckpt["normalizer"])
 
+    state = ckpt["ema"] if (use_ema and "ema" in ckpt) else ckpt["model"]
+    inferred_pool, has_null = _infer_encoder_geometry(state)
+    pool_size = cfg.get("pool_size", inferred_pool)
+    cfg_dropout = cfg.get("cfg_dropout", 0.0)
+
     model = MapConditionalTemporalUnet(
         horizon=cfg["horizon"],
         transition_dim=cfg["transition_dim"],
         cond_dim=cfg["observation_dim"],
         dim=cfg["dim"],
         dim_mults=tuple(cfg["dim_mults"]),
+        pool_size=pool_size,
+        cfg_dropout=cfg_dropout,
     )
     diffusion = MapConditionalGaussianDiffusion(
         model,
@@ -69,8 +99,22 @@ def load_mapcond_diffusion(ckpt_path, device="cpu", use_ema=True, horizon=None):
         clip_denoised=True,
         predict_epsilon=False,
     )
-    state = ckpt["ema"] if (use_ema and "ema" in ckpt) else ckpt["model"]
-    diffusion.load_state_dict(state)
+    if has_null:
+        diffusion.load_state_dict(state)
+    else:
+        # pre-CFG checkpoint: no null_map_emb in the state dict. Load the rest
+        # and leave the (zero) null embedding untrained -- but then CFG must
+        # stay off, because the null pathway was never trained.
+        missing, unexpected = diffusion.load_state_dict(state, strict=False)
+        assert not unexpected, f"unexpected keys: {unexpected}"
+        assert all(m.endswith("null_map_emb") for m in missing), \
+            f"unexpected missing keys: {missing}"
+        if guidance_scale > 0:
+            print("[inference] WARNING: checkpoint was trained without "
+                  "cfg_dropout; null pathway is untrained. Forcing "
+                  "guidance_scale = 0.")
+            guidance_scale = 0.0
+    diffusion.model.guidance_scale = float(guidance_scale)
     diffusion.to(device).eval()
     if horizon is not None:
         diffusion.horizon = horizon

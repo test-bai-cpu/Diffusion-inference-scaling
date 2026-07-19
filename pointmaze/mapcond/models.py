@@ -29,11 +29,25 @@ class MapConditionalTemporalUnet(TemporalUnet):
 
     def __init__(self, horizon, transition_dim, cond_dim,
                  dim=32, dim_mults=(1, 2, 4, 8),
-                 map_encoder_hidden=32, zero_init_map=False):
+                 map_encoder_hidden=32, zero_init_map=False,
+                 pool_size=4, cfg_dropout=0.1):
         super().__init__(horizon, transition_dim, cond_dim,
                          dim=dim, dim_mults=dim_mults)
         # time embedding is `dim`-wide (time_dim = dim in the parent); match it.
-        self.map_encoder = MapEncoder(out_dim=dim, hidden=map_encoder_hidden)
+        self.map_encoder = MapEncoder(out_dim=dim, hidden=map_encoder_hidden,
+                                      pool_size=pool_size)
+        # ---- classifier-free guidance (CFG) ----
+        # null_map_emb stands in for "maze unknown". During training, each
+        # sample's encoder output is replaced by it with prob cfg_dropout, so
+        # the model learns BOTH p(x|maze) and a marginal-ish p(x). At sampling,
+        # guidance_scale w > 0 blends the two passes:
+        #     out = (1 + w) * out_cond - w * out_null
+        # w lives on the module (not the checkpoint) -- a pure inference knob.
+        # Applied to the raw model output, so it is parameterization-agnostic
+        # (works for predict_epsilon True or False; this repo uses x0).
+        self.cfg_dropout = float(cfg_dropout)
+        self.guidance_scale = 0.0
+        self.null_map_emb = nn.Parameter(torch.zeros(dim))
         self.map_mlp = nn.Sequential(
             nn.Mish(),
             nn.Linear(dim, dim),
@@ -91,10 +105,32 @@ class MapConditionalTemporalUnet(TemporalUnet):
             # expand the single bound grid to the current batch size
             maze = self._bound_maze.expand(x.shape[0], *self._bound_maze.shape[1:])
 
-        t = self.time_mlp(time)
-        if maze is not None:
-            t = t + self.map_mlp(self.map_encoder(maze))
+        t_base = self.time_mlp(time)
 
+        if maze is None:
+            # map-blind: skip the map pathway entirely. This branch stays
+            # bit-identical to the parent TemporalUnet (backward compat).
+            out = self._run_trunk(x, t_base)
+            return einops.rearrange(out, "b t h -> b h t")
+
+        emb = self.map_encoder(maze)
+        if self.training and self.cfg_dropout > 0:
+            # per-sample conditioning dropout: replace encoder output with the
+            # learned null embedding, so the null pathway is trained too.
+            drop = torch.rand(emb.shape[0], device=emb.device) < self.cfg_dropout
+            emb = torch.where(drop[:, None], self.null_map_emb.unsqueeze(0), emb)
+
+        out = self._run_trunk(x, t_base + self.map_mlp(emb))
+
+        if (not self.training) and self.guidance_scale > 0:
+            null = self.null_map_emb.unsqueeze(0).expand(emb.shape[0], -1)
+            out_null = self._run_trunk(x, t_base + self.map_mlp(null))
+            out = (1 + self.guidance_scale) * out - self.guidance_scale * out_null
+
+        return einops.rearrange(out, "b t h -> b h t")
+
+    def _run_trunk(self, x, t):
+        """U-shaped trunk on channels-first x [B, C, H] with embedding t."""
         h = []
         for resnet, resnet2, downsample in self.downs:
             x = resnet(x, t)
@@ -111,9 +147,7 @@ class MapConditionalTemporalUnet(TemporalUnet):
             x = resnet2(x, t)
             x = upsample(x)
 
-        x = self.final_conv(x)
-        x = einops.rearrange(x, "b t h -> b h t")
-        return x
+        return self.final_conv(x)
 
 
 class MapConditionalGaussianDiffusion(GaussianDiffusion):

@@ -13,9 +13,18 @@ import torch.nn as nn
 
 
 class MapEncoder(nn.Module):
-    def __init__(self, out_dim, hidden=32, in_ch=1):
+    def __init__(self, out_dim, hidden=32, in_ch=1, pool_size=1):
+        """
+        pool_size=1 reproduces the original global-average-pool encoder.
+        pool_size=4 keeps a 4x4 spatial grid before flattening, so the
+        embedding retains coarse "which region has what" layout information
+        (the conv stack alone has only a ~7-cell receptive field). With the
+        fixed corner-anchored canvas, each of the 4x4 cells corresponds to a
+        consistent world region across maps.
+        """
         super().__init__()
         self.out_dim = out_dim
+        self.pool_size = int(pool_size)
         self.conv = nn.Sequential(
             nn.Conv2d(in_ch, hidden, kernel_size=3, padding=1),
             nn.GroupNorm(8, hidden),
@@ -27,10 +36,10 @@ class MapEncoder(nn.Module):
             nn.GroupNorm(8, hidden * 2),
             nn.Mish(),
         )
-        # Global average pool -> size-agnostic; then project to out_dim.
-        self.pool = nn.AdaptiveAvgPool2d(1)
+        # Adaptive average pool -> size-agnostic; then project to out_dim.
+        self.pool = nn.AdaptiveAvgPool2d(self.pool_size)
         self.head = nn.Sequential(
-            nn.Linear(hidden * 2, out_dim),
+            nn.Linear(hidden * 2 * self.pool_size * self.pool_size, out_dim),
             nn.Mish(),
             nn.Linear(out_dim, out_dim),
         )
