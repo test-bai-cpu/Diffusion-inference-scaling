@@ -66,10 +66,18 @@ def build(args, dataset):
     if args.map_blind:
         assert args.local_channels == 0, \
             "--map_blind is incompatible with --local_channels"
+    if args.local_film:
+        assert args.local_channels > 0, \
+            "--local_film requires --local_channels > 0"
     if args.local_channels > 0:
         from mapcond.models import LocalMapConditionalTemporalUnet
         from mapcond import local_features as LF
-        model = LocalMapConditionalTemporalUnet(
+        if args.local_film:
+            from mapcond.film_models import FiLMLocalMapConditionalTemporalUnet
+            model_cls = FiLMLocalMapConditionalTemporalUnet
+        else:
+            model_cls = LocalMapConditionalTemporalUnet
+        model = model_cls(
             horizon=args.horizon,
             transition_dim=dataset.transition_dim,
             cond_dim=dataset.observation_dim,
@@ -149,6 +157,7 @@ def save_ckpt(path, step, model, ema_model, dataset, args):
             "pool_size": args.pool_size,
             "cfg_dropout": args.cfg_dropout,
             "local_channels": args.local_channels,
+            "local_film": bool(args.local_film),
             "map_blind": bool(args.map_blind),
             "canvas_hw": list(dataset.canvas_hw),
             "pad_anchor": dataset.pad_anchor,
@@ -209,7 +218,16 @@ def train(args):
     n_params = sum(p.numel() for p in model.parameters())
     print(f"[train_multimap] model params: {n_params:,}", flush=True)
 
-    loss_log = []      # (step, loss)
+    loss_log = []
+    tb = None
+    if not getattr(args, "no_tensorboard", False):
+        try:
+            from torch.utils.tensorboard import SummaryWriter
+            tb = SummaryWriter(log_dir=os.path.join(args.savepath, "tb"))
+            print(f"[train_multimap] tensorboard -> {tb.log_dir}", flush=True)
+        except Exception as e:
+            print(f"[train_multimap] tensorboard disabled "
+                  f"({type(e).__name__}: {e})", flush=True)      # (step, loss)
     t0 = time.time()
     for step in range(args.n_train_steps):
         opt.zero_grad()
@@ -232,11 +250,30 @@ def train(args):
         if step % args.log_freq == 0:
             loss_log.append((step, float(loss)))
             rate = (step + 1) / (time.time() - t0)
-            print(f"{step:>7d} | loss {float(loss):8.5f} | {rate:6.1f} it/s", flush=True)
+            film_norm = _film_norm(diffusion)
+            film_str = f" | film {film_norm:9.5f}" if film_norm is not None else ""
+            print(f"{step:>7d} | loss {float(loss):8.5f} | {rate:6.1f} it/s"
+                  f"{film_str}", flush=True)
+            # crash-safe incremental log, watchable while training runs
+            _csv = os.path.join(args.savepath, "loss_log.csv")
+            _new = not os.path.exists(_csv)
+            with open(_csv, "a") as f:
+                if _new:
+                    f.write("step,loss,it_per_s,film_norm\n")
+                f.write(f"{step},{float(loss):.6f},{rate:.3f},"
+                        f"{'' if film_norm is None else f'{film_norm:.6f}'}\n")
+            if tb is not None:
+                tb.add_scalar("train/loss", float(loss), step)
+                tb.add_scalar("train/it_per_s", rate, step)
+                if film_norm is not None:
+                    tb.add_scalar("train/film_norm", film_norm, step)
 
         if step > 0 and step % args.save_freq == 0:
             save_ckpt(os.path.join(args.savepath, f"state_{step}.pt"),
                       step, diffusion, ema_model, dataset, args)
+            with open(os.path.join(args.savepath, "loss_log.json"), "w") as f:
+                json.dump(loss_log, f)
+            _plot_loss(loss_log, os.path.join(args.savepath, "train_loss.png"))
 
     # final checkpoint + loss log
     save_ckpt(os.path.join(args.savepath, f"state_{args.n_train_steps}.pt"),
@@ -244,8 +281,28 @@ def train(args):
     with open(os.path.join(args.savepath, "loss_log.json"), "w") as f:
         json.dump(loss_log, f)
     _plot_loss(loss_log, os.path.join(args.savepath, "train_loss.png"))
+    if tb is not None:
+        tb.close()
     print(f"[train_multimap] done in {time.time()-t0:.1f}s", flush=True)
     return loss_log
+
+
+def _film_norm(diffusion):
+    """Total weight norm of all FiLM projections, or None for non-FiLM
+    models. Growth from zero is the direct evidence that the network is
+    starting to USE the per-block local signal; a norm stuck near zero after
+    hundreds of thousands of steps means the pathway is being ignored."""
+    try:
+        from mapcond.film_models import FiLMBlockWrap
+    except Exception:
+        return None
+    total, found = 0.0, False
+    for m in diffusion.modules():
+        if isinstance(m, FiLMBlockWrap):
+            found = True
+            total += float(m.film_proj.weight.norm()) + \
+                     float(m.film_proj.bias.norm())
+    return total if found else None
 
 
 def _plot_loss(loss_log, out_png):
@@ -294,6 +351,14 @@ def get_args(argv=None):
                         "inference disables map binding automatically. "
                         "Ablation arm isolating data diversity from "
                         "conditioning.")
+    p.add_argument("--no_tensorboard", action="store_true",
+                   help="Disable TensorBoard logging (enabled by default when "
+                        "torch.utils.tensorboard is importable).")
+    p.add_argument("--local_film", action="store_true",
+                   help="With --local_channels > 0: additionally inject the "
+                        "per-timestep local features into EVERY residual "
+                        "block via zero-initialized FiLM (multiplicative "
+                        "gating), instead of input-concat only.")
     p.add_argument("--local_channels", type=int, default=0,
                    help="0 = global embedding only (current default); 2 = "
                         "also sample occupancy + BFS-distance channels at "

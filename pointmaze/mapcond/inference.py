@@ -82,9 +82,13 @@ def load_mapcond_diffusion(ckpt_path, device="cpu", use_ema=True, horizon=None,
 
     local_k = int(cfg.get("local_channels", 0))
     if local_k > 0:
-        from mapcond.models import LocalMapConditionalTemporalUnet
-        model_cls, extra = LocalMapConditionalTemporalUnet, \
-            {"local_channels": local_k}
+        if cfg.get("local_film", False):
+            from mapcond.film_models import FiLMLocalMapConditionalTemporalUnet
+            model_cls = FiLMLocalMapConditionalTemporalUnet
+        else:
+            from mapcond.models import LocalMapConditionalTemporalUnet
+            model_cls = LocalMapConditionalTemporalUnet
+        extra = {"local_channels": local_k}
     else:
         model_cls, extra = MapConditionalTemporalUnet, {}
     model = model_cls(
@@ -178,6 +182,7 @@ def bind_env_map(unet, env, canvas_hw=None, pad_anchor="corner"):
         # such a route.
         from mapcond import local_features as LF
         goal_ij = None
+        goal_xy = None
         ti = getattr(env, "cur_task_info", None)
         if ti is not None and "goal_xy" in ti:
             gx, gy = float(ti["goal_xy"][0]), float(ti["goal_xy"][1])
