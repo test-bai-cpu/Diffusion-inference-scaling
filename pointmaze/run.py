@@ -9,7 +9,7 @@ def main(dataset: str="pointmaze-giant-navigate-v0", method: str='dfs', device: 
          maze_weight: float=1.0, dist_weight: float=1.0,
          corner_radius_frac: float=0.30, corner_transition_weight: float=20.0,
          verifier_monitor: bool=False, verifier_monitor_freq: int=1,
-         use_map_cond: bool=False, map_cond_ckpt: str='', map_cond_use_ema: bool=True):
+         use_map_cond: bool=False, map_cond_ckpt: str='', map_cond_use_ema: bool=True, map_cond_guidance: float=0.0):
     args = Arguments()
     args.device = device
     args.dataset = dataset
@@ -34,6 +34,7 @@ def main(dataset: str="pointmaze-giant-navigate-v0", method: str='dfs', device: 
     args.use_map_cond = use_map_cond
     args.map_cond_ckpt = map_cond_ckpt
     args.map_cond_use_ema = map_cond_use_ema
+    args.map_cond_guidance = map_cond_guidance
     args_grid = get_args(args)
 
     import csv, os as _os
@@ -165,6 +166,9 @@ if __name__ == "__main__":
                         type=lambda x: str(x).lower() in ('1', 'true', 'yes', 'y'),
                         default=True,
                         help='Whether to load EMA weights from the mapcond checkpoint.')
+    parser.add_argument('--map_cond_guidance', type=float, default=0.0,
+                        help='CFG guidance scale w; 0 disables guidance.')
+    
     cli_args = parser.parse_args()
 
     main(dataset=cli_args.dataset, method=cli_args.method, device=cli_args.device, version=cli_args.version,
@@ -185,4 +189,5 @@ if __name__ == "__main__":
          verifier_monitor_freq=cli_args.verifier_monitor_freq,
          use_map_cond=cli_args.use_map_cond,
          map_cond_ckpt=cli_args.map_cond_ckpt,
-         map_cond_use_ema=cli_args.map_cond_use_ema)
+         map_cond_use_ema=cli_args.map_cond_use_ema,
+         map_cond_guidance=cli_args.map_cond_guidance)

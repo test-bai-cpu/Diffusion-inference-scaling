@@ -63,15 +63,40 @@ def cycle(dl):
 
 
 def build(args, dataset):
-    model = MapConditionalTemporalUnet(
-        horizon=args.horizon,
-        transition_dim=dataset.transition_dim,
-        cond_dim=dataset.observation_dim,
-        dim=args.dim,
-        dim_mults=tuple(args.dim_mults),
-        pool_size=args.pool_size,
-        cfg_dropout=args.cfg_dropout,
-    ).to(args.device)
+    if args.map_blind:
+        assert args.local_channels == 0, \
+            "--map_blind is incompatible with --local_channels"
+    if args.local_channels > 0:
+        from mapcond.models import LocalMapConditionalTemporalUnet
+        from mapcond import local_features as LF
+        model = LocalMapConditionalTemporalUnet(
+            horizon=args.horizon,
+            transition_dim=dataset.transition_dim,
+            cond_dim=dataset.observation_dim,
+            dim=args.dim,
+            dim_mults=tuple(args.dim_mults),
+            pool_size=args.pool_size,
+            cfg_dropout=args.cfg_dropout,
+            local_channels=args.local_channels,
+        )
+        lo, hi = dataset.normalizer.bounds["observations"]
+        scale, shift = LF.norm_xy_to_uv_affine(lo[:2], hi[:2],
+                                               dataset.canvas_hw)
+        model.set_coord_map(scale, shift)
+        print(f"[train_multimap] local_channels={args.local_channels} "
+              f"coord_map scale={scale.tolist()} shift={shift.tolist()}",
+              flush=True)
+        model = model.to(args.device)
+    else:
+        model = MapConditionalTemporalUnet(
+            horizon=args.horizon,
+            transition_dim=dataset.transition_dim,
+            cond_dim=dataset.observation_dim,
+            dim=args.dim,
+            dim_mults=tuple(args.dim_mults),
+            pool_size=args.pool_size,
+            cfg_dropout=args.cfg_dropout,
+        ).to(args.device)
     diffusion = MapConditionalGaussianDiffusion(
         model,
         horizon=args.horizon,
@@ -123,6 +148,8 @@ def save_ckpt(path, step, model, ema_model, dataset, args):
             "dim_mults": list(args.dim_mults),
             "pool_size": args.pool_size,
             "cfg_dropout": args.cfg_dropout,
+            "local_channels": args.local_channels,
+            "map_blind": bool(args.map_blind),
             "canvas_hw": list(dataset.canvas_hw),
             "pad_anchor": dataset.pad_anchor,
             "transition_dim": dataset.transition_dim,
@@ -145,6 +172,7 @@ def train(args):
             canvas_hw=None,                  # giant defines 12x16
             pad_anchor="corner",
             max_episodes_per_map=args.max_episodes_per_map,
+            local_dist=(args.local_channels >= 2),
         )
     else:
         dataset = MultiMazeGoalDataset(
@@ -153,6 +181,7 @@ def train(args):
             canvas_hw=None,                  # giant defines 12x16
             pad_anchor="corner",
             max_episodes_per_map=args.max_episodes_per_map,
+            local_dist=(args.local_channels >= 2),
         )
     preview = dataset.map_ids[:8]
     suffix = "" if len(dataset.map_ids) <= len(preview) else " ..."
@@ -188,7 +217,7 @@ def train(args):
             batch = next(loader)
             trajs = batch.trajectories.to(args.device)
             cond = {k: v.to(args.device) for k, v in batch.conditions.items()}
-            maze = batch.maze.to(args.device)
+            maze = None if args.map_blind else batch.maze.to(args.device)
             loss, info = diffusion.loss(trajs, cond, maze=maze)
             (loss / args.gradient_accumulate_every).backward()
         opt.step()
@@ -257,6 +286,18 @@ def get_args(argv=None):
     p.add_argument("--pool_size", type=int, default=4,
                    help="MapEncoder spatial pool grid; 1 = original global "
                         "average pool, 4 = keep 4x4 layout information.")
+    p.add_argument("--map_blind", action="store_true",
+                   help="Train the ORIGINAL map-blind method on the pooled "
+                        "multi-map data: the maze is never shown to the model "
+                        "(forward runs the maze=None branch, bit-identical to "
+                        "plain TemporalUnet). The checkpoint records this so "
+                        "inference disables map binding automatically. "
+                        "Ablation arm isolating data diversity from "
+                        "conditioning.")
+    p.add_argument("--local_channels", type=int, default=0,
+                   help="0 = global embedding only (current default); 2 = "
+                        "also sample occupancy + BFS-distance channels at "
+                        "each trajectory timestep (feature-grid conditioning).")
     p.add_argument("--cfg_dropout", type=float, default=0.1,
                    help="Prob. of replacing the map embedding with the learned "
                         "null embedding during training (classifier-free "

@@ -26,7 +26,14 @@ MapBatch = namedtuple("MapBatch", "trajectories conditions maze")
 class MultiMazeGoalDataset(torch.utils.data.Dataset):
     def __init__(self, maze_types=None, horizon=256, normalizer=None,
                  canvas_hw=None, pad_anchor="corner", min_episode_len=None,
-                 max_episodes_per_map=None, map_specs=None):
+                 max_episodes_per_map=None, map_specs=None, local_dist=False):
+        # local_dist: when True, __getitem__ returns the maze as a [2, Hc, Wc]
+        # channel stack (occupancy, BFS distance to this window's goal cell)
+        # for LocalMapConditionalTemporalUnet. Distance fields are cached per
+        # (map, goal cell) -- at most Hc*Wc BFS runs per map, each on a tiny
+        # grid. Default False keeps the [Hc, Wc] occupancy-only behaviour.
+        self.local_dist = bool(local_dist)
+        self._dist_cache = {}
         if map_specs is None:
             if maze_types is None:
                 raise ValueError("provide maze_types or map_specs")
@@ -170,7 +177,21 @@ class MultiMazeGoalDataset(torch.utils.data.Dataset):
         conditions = self.get_conditions(obs)
         trajectories = np.concatenate([act, obs], axis=-1).astype(np.float32)
         maze = self.grids[map_id]  # [Hc, Wc] float32
+        if self.local_dist:
+            maze = self._local_stack(map_id, obs[-1])
         return MapBatch(trajectories, conditions, maze)
+
+    def _local_stack(self, map_id, goal_obs_norm):
+        """[2, Hc, Wc]: occupancy + BFS distance to this window's goal cell."""
+        from . import local_features as LF
+        goal_world = self.normalizer.unnormalize(
+            np.asarray(goal_obs_norm, np.float32), "observations")
+        gi, gj = LF.world_xy_to_cell(goal_world[0], goal_world[1])
+        key = (map_id, gi, gj)
+        if key not in self._dist_cache:
+            self._dist_cache[key] = LF.bfs_distance_field(
+                self.grids[map_id], (gi, gj))
+        return np.stack([self.grids[map_id], self._dist_cache[key]], axis=0)
 
 
 def map_batch_collate(samples):

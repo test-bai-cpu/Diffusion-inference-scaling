@@ -46,7 +46,30 @@ class DFSGuidance(BaseGuidance):
             return stats["MazeVerifier"]
         return stats
 
-    def _print_monitor(self, i, t, cost, threshold, accept, forced_best=False):
+    def _violation_cost(self, total_cost):
+        """
+        Cost used for the accept/reject THRESHOLD test.
+
+        With a CompositeVerifier (distance field on), the total cost carries a
+        nonzero "route preference" floor from DistanceFieldVerifier even for
+        perfectly legal trajectories, so thresholding on it never accepts and
+        the budget is always exhausted. Threshold on the MazeVerifier
+        (violation) component only; ranking in the buffer / forced_best still
+        uses the combined total, so the distance preference keeps deciding
+        WHICH candidate wins -- it just no longer decides WHETHER a clean
+        candidate may be accepted early.
+
+        Falls back to total_cost when the guider is a bare MazeVerifier
+        (distance field off), which is bit-identical to the old behaviour.
+        """
+        stats = getattr(self.guider, "last_stats", {})
+        maze = stats.get("MazeVerifier")
+        if isinstance(maze, dict) and "weighted_logp_sum" in maze:
+            return -maze["weighted_logp_sum"]
+        return float(total_cost)
+
+    def _print_monitor(self, i, t, cost, threshold, accept, forced_best=False,
+                       violation=None):
         if not getattr(self.args, "verifier_monitor", False):
             return
         freq = max(1, int(getattr(self.args, "verifier_monitor_freq", 1)))
@@ -65,14 +88,15 @@ class DFSGuidance(BaseGuidance):
         n_corners = stats.get("n_forbidden_corners", -1)
         radius = stats.get("corner_radius", float("nan"))
         reason = "forced_best" if forced_best else ("accept" if accept else "reject")
+        viol = float(cost) if violation is None else float(violation)
         print(
-            "[verifier] step=%02d t=%d cost=%.3f threshold=%.3f %s "
+            "[verifier] step=%02d t=%d cost=%.3f viol=%.3f threshold=%.3f %s "
             "budget=%d wall=%.3f "
             "trans=%.3f raw_trans=%.3f raw_cell=%.1f raw_zone=%.1f "
             "hit(wall/trans)=%.3f/%.3f "
             "corners=%s radius=%.3f" % (
                 i, int(t.item()) if hasattr(t, "item") else int(t),
-                float(cost), float(threshold), reason, int(self.budget),
+                float(cost), viol, float(threshold), reason, int(self.budget),
                 float(wall), float(transition), float(transition_raw),
                 float(cell_raw), float(zone_raw), float(wall_hit), float(transition_hit),
                 str(n_corners), float(radius),
@@ -103,12 +127,13 @@ class DFSGuidance(BaseGuidance):
         if i in self.evaluation_steps():
             self.buffer[i][logprobs.sum().item()] = x_prev
             cost = -logprobs.sum()
+            violation = self._violation_cost(cost)
             threshold = self.get_threshold(i, alpha_prod_ts, alpha_prod_t_prevs)
             forced_best = False
-            if cost > threshold and self.budget > 0:
+            if violation > threshold and self.budget > 0:
                 accept = False
                 self.budget -= 1
-            elif cost > threshold and self.budget == 0:
+            elif violation > threshold and self.budget == 0:
                 accept = True
                 forced_best = True
                 x_prev = self.buffer[i][max(self.buffer[i].keys())] 
@@ -116,7 +141,7 @@ class DFSGuidance(BaseGuidance):
                 accept = True
             self._print_monitor(i, ts[i], cost.detach().cpu().item(),
                                 threshold.detach().cpu().item(), accept,
-                                forced_best=forced_best)
+                                forced_best=forced_best, violation=violation)
         
         if accept:
             return x_prev, {"i_next": i + 1}

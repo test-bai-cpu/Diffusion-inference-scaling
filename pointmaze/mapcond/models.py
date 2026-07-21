@@ -82,7 +82,17 @@ class MapConditionalTemporalUnet(TemporalUnet):
         This is what makes the map-conditioning OPT-IN at inference without
         editing any search/ code: the pipeline binds the OOD map once per task,
         every denoise step then sees it, and clearing restores map-blind.
+
+        On map-blind baseline checkpoints (trained with --map_blind, map
+        pathway never received gradients) binding is refused: injecting an
+        UNTRAINED encoder's output would corrupt sampling, so the model stays
+        on the maze=None branch, bit-identical to plain TemporalUnet.
         """
+        if getattr(self, "map_blind", False):
+            if maze is not None:
+                print("[mapcond] map-blind baseline: ignoring bind_maze()")
+            self._bound_maze = None
+            return
         if maze is None:
             self._bound_maze = None
             return
@@ -148,6 +158,130 @@ class MapConditionalTemporalUnet(TemporalUnet):
             x = upsample(x)
 
         return self.final_conv(x)
+
+
+class LocalMapConditionalTemporalUnet(MapConditionalTemporalUnet):
+    """
+    Adds per-timestep local map conditioning ("feature grid") on top of the
+    global-embedding + CFG pathway.
+
+    The bound/passed maze is now a CHANNEL STACK [C, Hc, Wc] (see
+    local_features.build_local_stack; C = local_channels, channel 0 must be
+    occupancy). Channel 0 feeds the global MapEncoder as before; ALL channels
+    are bilinearly sampled at each trajectory timestep's normalized (x, y)
+    and concatenated to the UNet input, so every denoise step receives the
+    map content under its own feet -- walls and distance-to-goal are delivered
+    locally instead of decoded from a summary vector.
+
+    Coordinate mapping is a fixed affine (shared normalizer + fixed canvas),
+    installed once via set_coord_map() and stored in checkpoint buffers.
+
+    CFG semantics: conditioning = global embedding AND local channels
+    together. Training dropout nulls both for the dropped samples; the
+    guidance's unconditional pass uses the null embedding and zeroed local
+    channels. maze=None runs "map-blind" with zeroed local channels (well
+    defined, but NOT bit-identical to TemporalUnet -- the first block has
+    extra input weights).
+    """
+
+    def __init__(self, horizon, transition_dim, cond_dim,
+                 dim=32, dim_mults=(1, 2, 4, 8),
+                 map_encoder_hidden=32, zero_init_map=False,
+                 pool_size=4, cfg_dropout=0.1, local_channels=2):
+        super().__init__(horizon, transition_dim, cond_dim,
+                         dim=dim, dim_mults=dim_mults,
+                         map_encoder_hidden=map_encoder_hidden,
+                         zero_init_map=zero_init_map,
+                         pool_size=pool_size, cfg_dropout=cfg_dropout)
+        self.local_channels = int(local_channels)
+        assert self.local_channels >= 1, \
+            "use MapConditionalTemporalUnet for local_channels=0"
+        # rebuild ONLY the first down-block resnet to accept the extra input
+        # channels; everything downstream (incl. final_conv -> transition_dim)
+        # is unchanged.
+        from diffuser.models.temporal import ResidualTemporalBlock
+        first_out = dim * dim_mults[0]
+        self.downs[0][0] = ResidualTemporalBlock(
+            transition_dim + self.local_channels, first_out,
+            embed_dim=dim, horizon=horizon)
+        # normalized-xy -> grid_sample-uv affine; installed by set_coord_map,
+        # persisted in checkpoints as buffers.
+        self.register_buffer("uv_scale", torch.zeros(2))
+        self.register_buffer("uv_shift", torch.zeros(2))
+        self.register_buffer("coord_map_ready", torch.zeros(1))
+
+    def set_coord_map(self, scale, shift):
+        with torch.no_grad():
+            self.uv_scale.copy_(torch.as_tensor(scale, dtype=torch.float32))
+            self.uv_shift.copy_(torch.as_tensor(shift, dtype=torch.float32))
+            self.coord_map_ready.fill_(1.0)
+
+    def bind_maze(self, maze):
+        """Accepts [Hc,Wc] (occupancy only -> dist channel zeros), [C,Hc,Wc],
+        or None to clear."""
+        if maze is None:
+            self._bound_maze = None
+            return
+        maze = torch.as_tensor(maze, dtype=torch.float32)
+        if maze.dim() == 2:
+            pad = maze.new_zeros(self.local_channels - 1, *maze.shape)
+            maze = torch.cat([maze.unsqueeze(0), pad], dim=0)
+        assert maze.dim() == 3 and maze.shape[0] == self.local_channels, \
+            f"expected [{self.local_channels},H,W] stack, got {tuple(maze.shape)}"
+        dev = next(self.parameters()).device
+        self._bound_maze = maze.unsqueeze(0).to(dev)   # [1,C,H,W]
+
+    def sample_local(self, maze, xy_norm):
+        """
+        maze [B,C,Hc,Wc], xy_norm [B,H,2] in [-1,1] -> [B,C,H] bilinear
+        samples at each timestep's position (border padding: outside the
+        canvas reads as the edge, which is wall for occupancy).
+        """
+        assert bool(self.coord_map_ready.item()), \
+            "coord map not installed; call set_coord_map() (train_multimap " \
+            "does this) or load a checkpoint that contains it"
+        grid = xy_norm * self.uv_scale + self.uv_shift          # [B,H,2]
+        grid = grid.unsqueeze(2)                                 # [B,H,1,2]
+        out = torch.nn.functional.grid_sample(
+            maze, grid, mode="bilinear", padding_mode="border",
+            align_corners=False)                                 # [B,C,H,1]
+        return out[..., 0]
+
+    def forward(self, x, cond, time, maze=None):
+        B = x.shape[0]
+        if maze is None and self._bound_maze is not None:
+            maze = self._bound_maze.expand(B, *self._bound_maze.shape[1:])
+        if maze is not None and maze.dim() == 3:                 # [B,H,W] occ
+            pad = maze.new_zeros(B, self.local_channels - 1, *maze.shape[1:])
+            maze = torch.cat([maze.unsqueeze(1), pad], dim=1)
+
+        xy = x[..., 2:4]                                         # normalized
+        x_cf = einops.rearrange(x, "b h t -> b t h")
+        t_base = self.time_mlp(time)
+
+        if maze is None:
+            local = x_cf.new_zeros(B, self.local_channels, x_cf.shape[-1])
+            out = self._run_trunk(torch.cat([x_cf, local], dim=1), t_base)
+            return einops.rearrange(out, "b t h -> b h t")
+
+        emb = self.map_encoder(maze[:, :1])
+        local = self.sample_local(maze, xy)
+        if self.training and self.cfg_dropout > 0:
+            drop = torch.rand(B, device=x.device) < self.cfg_dropout
+            emb = torch.where(drop[:, None], self.null_map_emb.unsqueeze(0), emb)
+            local = local * (~drop)[:, None, None].float()
+
+        out = self._run_trunk(torch.cat([x_cf, local], dim=1),
+                              t_base + self.map_mlp(emb))
+
+        if (not self.training) and self.guidance_scale > 0:
+            null = self.null_map_emb.unsqueeze(0).expand(B, -1)
+            zeros = torch.zeros_like(local)
+            out_null = self._run_trunk(torch.cat([x_cf, zeros], dim=1),
+                                       t_base + self.map_mlp(null))
+            out = (1 + self.guidance_scale) * out - self.guidance_scale * out_null
+
+        return einops.rearrange(out, "b t h -> b h t")
 
 
 class MapConditionalGaussianDiffusion(GaussianDiffusion):

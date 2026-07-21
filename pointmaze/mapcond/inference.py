@@ -80,12 +80,20 @@ def load_mapcond_diffusion(ckpt_path, device="cpu", use_ema=True, horizon=None,
     pool_size = cfg.get("pool_size", inferred_pool)
     cfg_dropout = cfg.get("cfg_dropout", 0.0)
 
-    model = MapConditionalTemporalUnet(
+    local_k = int(cfg.get("local_channels", 0))
+    if local_k > 0:
+        from mapcond.models import LocalMapConditionalTemporalUnet
+        model_cls, extra = LocalMapConditionalTemporalUnet, \
+            {"local_channels": local_k}
+    else:
+        model_cls, extra = MapConditionalTemporalUnet, {}
+    model = model_cls(
         horizon=cfg["horizon"],
         transition_dim=cfg["transition_dim"],
         cond_dim=cfg["observation_dim"],
         dim=cfg["dim"],
         dim_mults=tuple(cfg["dim_mults"]),
+        **extra,
         pool_size=pool_size,
         cfg_dropout=cfg_dropout,
     )
@@ -115,6 +123,14 @@ def load_mapcond_diffusion(ckpt_path, device="cpu", use_ema=True, horizon=None,
                   "guidance_scale = 0.")
             guidance_scale = 0.0
     diffusion.model.guidance_scale = float(guidance_scale)
+    diffusion.model.map_blind = bool(cfg.get("map_blind", False))
+    if diffusion.model.map_blind:
+        if guidance_scale > 0:
+            print("[inference] WARNING: map-blind baseline; forcing "
+                  "guidance_scale = 0.")
+            diffusion.model.guidance_scale = 0.0
+        print("[mapcond] MAP-BLIND baseline checkpoint: maze conditioning "
+              "disabled (bind_maze is a no-op).")
     diffusion.to(device).eval()
     if horizon is not None:
         diffusion.horizon = horizon
@@ -153,5 +169,27 @@ def bind_env_map(unet, env, canvas_hw=None, pad_anchor="corner"):
             # fall back to the training default canvas (giant defines 12x16)
             canvas_hw = MG.canvas_size(MG.all_grids())
     grid = env_to_canvas_grid(env, canvas_hw, pad_anchor=pad_anchor)
+    local_k = int(getattr(unet, "local_channels", 0))
+    if local_k >= 2:
+        # Build the per-timestep channel stack on the TRUE grid: occupancy +
+        # BFS distance to this task's goal. The distance field is computed on
+        # the actual (possibly OOD) variant topology, so the correct detour is
+        # delivered to the model as input even if the learned prior never saw
+        # such a route.
+        from mapcond import local_features as LF
+        goal_ij = None
+        ti = getattr(env, "cur_task_info", None)
+        if ti is not None and "goal_xy" in ti:
+            gx, gy = float(ti["goal_xy"][0]), float(ti["goal_xy"][1])
+            goal_xy = (round(gx, 2), round(gy, 2))
+            goal_ij = LF.world_xy_to_cell(gx, gy)
+        else:
+            print("[mapcond] WARNING: env.cur_task_info missing; binding "
+                  "all-ones distance channel (goal unknown)")
+        stack = LF.build_local_stack(grid, goal_ij)
+        unet.bind_maze(stack)
+        print(f"[mapcond] bound local stack {stack.shape} "
+              f"(goal_xy = {goal_xy} -> goal cell = {goal_ij})")
+        return stack
     unet.bind_maze(grid)
     return grid

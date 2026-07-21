@@ -58,11 +58,13 @@ class BasePipe:
                 ckpt, device=self.args.device,
                 use_ema=getattr(self.args, 'map_cond_use_ema', True),
                 horizon=self.args.sampling_horizon,
+                guidance_scale=getattr(self.args, 'map_cond_guidance', 0.0),
             )
             diffusion = mc_diffusion
             self._mapcond_normalizer = mc_normalizer
             print(f"[mapcond] loaded map-conditional generator from {ckpt} "
-                  f"(maps={mc_cfg['maps']}, canvas={mc_cfg['canvas_hw']})")
+                  f"(maps={mc_cfg['maps']}, canvas={mc_cfg['canvas_hw']}, "
+                  f"guidance_scale={mc_diffusion.model.guidance_scale})")
 
         # use the map-conditional shared normalizer if we have one
         _normalizer = self._mapcond_normalizer or dataset.normalizer
@@ -232,6 +234,7 @@ class BasePipe:
             # every unet(x, cond, t) call in guide_step see it -- no search edits.
             if getattr(self.args, 'use_map_cond', False):
                 from mapcond.inference import bind_env_map
+                self.env.reset(options={"task_id": task_id})
                 grid = bind_env_map(self.env_diffusion.model, self.env)
                 if grid is not None:
                     print(f"[mapcond] task {task_id}: bound env map grid {grid.shape}")

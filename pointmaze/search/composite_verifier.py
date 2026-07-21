@@ -38,6 +38,12 @@ class CompositeVerifier:
                 if hasattr(v, "last_stats"):
                     stats[name] = dict(v.last_stats)
                     stats[name]["composite_weight"] = float(w)
+                # expose each verifier's weighted contribution so callers can
+                # separate hard violations (MazeVerifier) from soft preferences
+                # (DistanceFieldVerifier) -- e.g. DFS thresholds on the former
+                # while still ranking by the combined total.
+                stats.setdefault(name, {})
+                stats[name]["weighted_logp_sum"] = float((w * lp).sum().item())
                 total = w * lp if total is None else total + w * lp
             self.last_stats = stats
             if total is None:
