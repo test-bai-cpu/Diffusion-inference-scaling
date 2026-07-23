@@ -11,6 +11,7 @@ cd ogbench
 pip install -e .
 cd ..
 pip install -e .
+pip install tensorboard
 ```
 Then, download and extract the pretrained models from [here](https://drive.google.com/file/d/1ZMhoOkLLMozUdADKph3oed_OwzAYtiD1/view?usp=sharing) and put them in the `logs/` directory. For the collected trajectory dataset for the Ultra Maze, download and extract the files from [here](https://drive.google.com/file/d/1doAvARCm04axeXFUn8ETRgWfcoMt84m3/view?usp=sharing), and put the files `pointmaze-ultra-navigate-v0.npz` and `pointmaze-ultra-navigate-v0-val.npz` in the directory `~/.ogbench/data`. 
 
@@ -21,3 +22,22 @@ python run.py --dataset pointmaze-giant-navigate-v0 --method dfs --device cuda
 ```
 You can change the method in `dfs`, `bfs-resampling`, `bfs-pruning` and `bon`, and change the dataset in `pointmaze-giant-navigate-v0` and `pointmaze-ultra-navigate-v0`. 
 
+
+
+## Install in ncsa
+module reset
+module load pytorch-conda
+
+export CONDA_PKGS_DIRS=/projects/bhlg/yzhu37/.conda/pkgs
+mkdir -p /projects/bhlg/yzhu37/.conda/pkgs
+
+cd /projects/bhlg/yzhu37/Diffusion-inference-scaling/pointmaze
+
+conda create -p /projects/bhlg/yzhu37/envs/maze python=3.10 -y
+conda activate /projects/bhlg/yzhu37/envs/maze
+
+pip install -r requirements.txt
+cd ogbench
+pip install -e .
+cd ..
+pip install -e .

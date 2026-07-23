@@ -24,6 +24,14 @@ squeue -u $USER
 To watch the live output while it runs:
 tail -f slurm-<jobid>.out
 
+To find the job ID
+squeue -u yzhu37
+
+To cancel with job ID
+scancel <jobid>
+
+To cancel all jobs
+scancel -u yzhu37
 
 TODO:
 1. double check the plot function.

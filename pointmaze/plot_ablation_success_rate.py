@@ -31,7 +31,8 @@ from plot_success_rate import (
 HERE = Path(__file__).resolve().parent
 
 DEFAULT_ABLATIONS = (
-    ("results_newvar_level.txt", "Pure DFS"),
+    # ("results_newvar_level.txt", "Baseline"),
+    ("results_dfs_pointmaze-giant-newvar-navigate-v0_dfs_trainall.txt", "Baseline"),
     (
         "results_dfs_pointmaze-giant-newvar-navigate-v0_"
         "mazev1-cond-trainonv2.txt",
@@ -523,11 +524,11 @@ def _summary_output_path(path_arg, tasks, level, multi_levels):
     if path_arg is None:
         if len(tasks) > 1:
             return HERE / (
-                f"ablation_success_rate_average_"
+                f"all_train_ablation_success_rate_average_"
                 f"{_task_suffix(tasks)}_level{level}_summary.png"
             )
         task = _single_task_label(tasks)
-        return HERE / f"ablation_success_rate_task{task}_level{level}_summary.png"
+        return HERE / f"all_train_ablation_success_rate_task{task}_level{level}_summary.png"
 
     output_path = Path(path_arg)
     if multi_levels:

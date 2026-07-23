@@ -267,6 +267,10 @@ class MazeVerifier():
         zone_transition_cost = zone_transition_loss.sum(dim=tuple(range(1, zone_transition_loss.ndim)))
         transition_cost = transition_loss.sum(dim=tuple(range(1, transition_loss.ndim)))
         total_cost = loss.sum(dim=tuple(range(1, loss.ndim)))
+        # per-timestep hit mask (batch, T): True where this timestep is inside a
+        # wall or on a forbidden corner transition. Used by DFS local re-noising
+        # to target only the violating region instead of the whole trajectory.
+        violation_mask = (wall_loss.detach() > 0) | (transition_loss.detach() > 0)
         self.last_stats = {
             "wall_cost_mean": float(wall_cost.detach().mean().cpu()),
             "wall_cost_max": float(wall_cost.detach().max().cpu()),
@@ -285,6 +289,7 @@ class MazeVerifier():
             "n_forbidden_corners": int(0 if self.corner_points is None else self.corner_points.shape[0]),
             "corner_radius": float(self.corner_radius),
             "corner_transition_weight": float(self.corner_transition_weight),
+            "violation_mask": violation_mask,
         }
 
         if return_logp:

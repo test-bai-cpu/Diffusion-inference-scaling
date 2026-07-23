@@ -30,6 +30,7 @@ HERE = Path(__file__).resolve().parent
 
 DEFAULT_METHODS = (
     ("results_newvar_level.txt", "Baseline"),
+    # ("results_dfs_pointmaze-giant-newvar-navigate-v0_dfs_trainall.txt", "Baseline"),
     # ("results_newvar_bfs_guidance_level.txt", "DFS + distance (no corner)"),
     (
         "results_dfs_pointmaze-giant-newvar-navigate-v0_"
@@ -263,8 +264,8 @@ def plot_task_comparison(df, task, output_path, show_band=True):
 
     _style_axes(ax)
     _style_outside_legend(ax)
-    plt.tight_layout(pad=0.4)
-    plt.savefig(output_path, dpi=220, bbox_inches="tight", pad_inches=0.04)
+    plt.tight_layout(pad=0.8)
+    plt.savefig(output_path, dpi=220, bbox_inches="tight", pad_inches=0.12)
     plt.close(fig)
     print(f"Saved figure to: {output_path}")
 
@@ -318,8 +319,8 @@ def plot_task_average_comparison(df, tasks, output_path, show_band=True):
 
     _style_axes(ax)
     _style_outside_legend(ax)
-    plt.tight_layout(pad=0.4)
-    plt.savefig(output_path, dpi=220, bbox_inches="tight", pad_inches=0.04)
+    plt.tight_layout(pad=0.8)
+    plt.savefig(output_path, dpi=220, bbox_inches="tight", pad_inches=0.12)
     plt.close(fig)
     print(f"Saved figure to: {output_path}")
 

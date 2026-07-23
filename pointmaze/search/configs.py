@@ -50,6 +50,12 @@ class Arguments:
     recur_depth: int = field(default=4)
     budget: int = field(default=4)
 
+    # DFS acceptance refinements (opt-in; defaults reproduce current behaviour exactly)
+    dfs_threshold_base: Optional[float] = field(default=None)  # None => use `threshold` (legacy)
+    dfs_threshold_shape: str = field(default='current')        # current | noise_scaled
+    dfs_trans_threshold: Optional[float] = field(default=None) # None => trans folded into main viol test (legacy)
+    dfs_local_renoise: int = field(default=0)                  # 0 => whole-trajectory re-noise (legacy)
+
     # for bfs
     temp: float = field(default=1.0)
     temp_schedule: str = field(default='increase')

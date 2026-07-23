@@ -9,6 +9,8 @@ def main(dataset: str="pointmaze-giant-navigate-v0", method: str='dfs', device: 
          maze_weight: float=1.0, dist_weight: float=1.0,
          corner_radius_frac: float=0.30, corner_transition_weight: float=20.0,
          verifier_monitor: bool=False, verifier_monitor_freq: int=1,
+         dfs_threshold_base: float=None, dfs_threshold_shape: str='current',
+         dfs_trans_threshold: float=None, dfs_local_renoise: int=0,
          use_map_cond: bool=False, map_cond_ckpt: str='', map_cond_use_ema: bool=True, map_cond_guidance: float=0.0):
     args = Arguments()
     args.device = device
@@ -31,6 +33,10 @@ def main(dataset: str="pointmaze-giant-navigate-v0", method: str='dfs', device: 
     args.corner_transition_weight = corner_transition_weight
     args.verifier_monitor = verifier_monitor
     args.verifier_monitor_freq = verifier_monitor_freq
+    args.dfs_threshold_base = dfs_threshold_base
+    args.dfs_threshold_shape = dfs_threshold_shape
+    args.dfs_trans_threshold = dfs_trans_threshold
+    args.dfs_local_renoise = dfs_local_renoise
     args.use_map_cond = use_map_cond
     args.map_cond_ckpt = map_cond_ckpt
     args.map_cond_use_ema = map_cond_use_ema
@@ -156,6 +162,27 @@ if __name__ == "__main__":
     parser.add_argument('--verifier_monitor_freq',
                         type=int, default=1,
                         help='Print every N DFS verifier checks when --verifier_monitor is set.')
+    parser.add_argument('--dfs_threshold_base',
+                        type=float, default=None,
+                        help='Base value for the DFS accept/reject threshold schedule. '
+                             'Defaults to --threshold (legacy behaviour) when unset.')
+    parser.add_argument('--dfs_threshold_shape',
+                        type=str, default='current', choices=['current', 'noise_scaled'],
+                        help='DFS threshold schedule shape. "current" reproduces existing '
+                             'behaviour exactly; "noise_scaled" scales the threshold by the '
+                             'noise level at each evaluation step (loose early, strict late), '
+                             'normalized so the last evaluation step equals dfs_threshold_base.')
+    parser.add_argument('--dfs_trans_threshold',
+                        type=float, default=None,
+                        help='If set, corner-transition violation cost is tested against its '
+                             'own threshold and removed from the main (wall) violation test; '
+                             'acceptance requires both tests to pass. Unset (default) keeps the '
+                             'legacy single combined wall+transition test.')
+    parser.add_argument('--dfs_local_renoise',
+                        type=int, default=0,
+                        help='On rejection, re-noise only violating timesteps dilated by this '
+                             'many positions instead of the whole trajectory. 0 (default) = '
+                             'legacy whole-trajectory re-noise.')
     parser.add_argument('--use_map_cond',
                         action='store_true', default=False,
                         help='Use a map-conditional diffusion checkpoint from mapcond.train_multimap.')
@@ -187,6 +214,10 @@ if __name__ == "__main__":
          corner_transition_weight=cli_args.corner_transition_weight,
          verifier_monitor=cli_args.verifier_monitor,
          verifier_monitor_freq=cli_args.verifier_monitor_freq,
+         dfs_threshold_base=cli_args.dfs_threshold_base,
+         dfs_threshold_shape=cli_args.dfs_threshold_shape,
+         dfs_trans_threshold=cli_args.dfs_trans_threshold,
+         dfs_local_renoise=cli_args.dfs_local_renoise,
          use_map_cond=cli_args.use_map_cond,
          map_cond_ckpt=cli_args.map_cond_ckpt,
          map_cond_use_ema=cli_args.map_cond_use_ema,
