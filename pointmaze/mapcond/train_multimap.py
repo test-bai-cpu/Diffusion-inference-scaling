@@ -69,7 +69,44 @@ def build(args, dataset):
     if args.local_film:
         assert args.local_channels > 0, \
             "--local_film requires --local_channels > 0"
-    if args.local_channels > 0:
+    if args.backbone == "dit":
+        assert not args.global_film and args.local_channels == 0 \
+            and not args.local_film, \
+            "--backbone dit only implements the Global-FiLM-equivalent tier " \
+            "so far (adaLN-Zero IS global FiLM, built into MapConditionalDiT1D " \
+            "-- see mapcond/dit_models.py); --global_film/--local_channels/" \
+            "--local_film are U-Net-only for now"
+        from mapcond.dit_models import MapConditionalDiT1D
+        model = MapConditionalDiT1D(
+            horizon=args.horizon,
+            transition_dim=dataset.transition_dim,
+            cond_dim=dataset.observation_dim,
+            hidden=args.dit_hidden,
+            heads=args.dit_heads,
+            depth=args.dit_depth,
+            patch_size=args.dit_patch_size,
+            mlp_ratio=args.dit_mlp_ratio,
+            pool_size=args.pool_size,
+            cfg_dropout=args.cfg_dropout,
+        ).to(args.device)
+    elif args.global_film:
+        assert args.local_channels == 0, \
+            "--global_film is a global-only tier for now; incompatible " \
+            "with --local_channels (use --local_film for the local tier)"
+        assert not args.map_blind, \
+            "--global_film is incompatible with --map_blind (there is no " \
+            "other map pathway left to be blind about)"
+        from mapcond.global_film_models import GlobalFiLMTemporalUnet
+        model = GlobalFiLMTemporalUnet(
+            horizon=args.horizon,
+            transition_dim=dataset.transition_dim,
+            cond_dim=dataset.observation_dim,
+            dim=args.dim,
+            dim_mults=tuple(args.dim_mults),
+            pool_size=args.pool_size,
+            cfg_dropout=args.cfg_dropout,
+        ).to(args.device)
+    elif args.local_channels > 0:
         from mapcond.models import LocalMapConditionalTemporalUnet
         from mapcond import local_features as LF
         if args.local_film:
@@ -158,7 +195,14 @@ def save_ckpt(path, step, model, ema_model, dataset, args):
             "cfg_dropout": args.cfg_dropout,
             "local_channels": args.local_channels,
             "local_film": bool(args.local_film),
+            "global_film": bool(args.global_film),
             "map_blind": bool(args.map_blind),
+            "backbone": args.backbone,
+            "dit_hidden": args.dit_hidden,
+            "dit_heads": args.dit_heads,
+            "dit_depth": args.dit_depth,
+            "dit_patch_size": args.dit_patch_size,
+            "dit_mlp_ratio": args.dit_mlp_ratio,
             "canvas_hw": list(dataset.canvas_hw),
             "pad_anchor": dataset.pad_anchor,
             "transition_dim": dataset.transition_dim,
@@ -288,20 +332,34 @@ def train(args):
 
 
 def _film_norm(diffusion):
-    """Total weight norm of all FiLM projections, or None for non-FiLM
-    models. Growth from zero is the direct evidence that the network is
-    starting to USE the per-block local signal; a norm stuck near zero after
-    hundreds of thousands of steps means the pathway is being ignored."""
+    """Total weight norm of all FiLM output projections, or None for non-FiLM
+    models. film_out is the only zero-initialized layer in either FiLM branch
+    (local: mapcond.film_models.FiLMBlockWrap; global:
+    mapcond.global_film_models.GlobalFiLMBlockWrap -- their other internal
+    layers are normally initialized, since film_out being zero already
+    guarantees gamma=beta=0 at init regardless of what feeds it) -- growth
+    from zero is the direct evidence that the network is starting to USE the
+    conditioning signal; a norm stuck near zero after hundreds of thousands
+    of steps means the pathway is being ignored."""
+    wrap_classes = []
     try:
         from mapcond.film_models import FiLMBlockWrap
+        wrap_classes.append(FiLMBlockWrap)
     except Exception:
+        pass
+    try:
+        from mapcond.global_film_models import GlobalFiLMBlockWrap
+        wrap_classes.append(GlobalFiLMBlockWrap)
+    except Exception:
+        pass
+    if not wrap_classes:
         return None
     total, found = 0.0, False
     for m in diffusion.modules():
-        if isinstance(m, FiLMBlockWrap):
+        if isinstance(m, tuple(wrap_classes)):
             found = True
-            total += float(m.film_proj.weight.norm()) + \
-                     float(m.film_proj.bias.norm())
+            total += float(m.film_out.weight.norm()) + \
+                     float(m.film_out.bias.norm())
     return total if found else None
 
 
@@ -363,6 +421,36 @@ def get_args(argv=None):
                    help="0 = global embedding only (current default); 2 = "
                         "also sample occupancy + BFS-distance channels at "
                         "each trajectory timestep (feature-grid conditioning).")
+    p.add_argument("--global_film", action="store_true",
+                   help="Inject the GLOBAL map embedding into every residual "
+                        "block via zero-initialized FiLM (mapcond.global_"
+                        "film_models.GlobalFiLMTemporalUnet), instead of "
+                        "MapConditionalTemporalUnet's addition into the time "
+                        "embedding. A clean single-variable alternative to "
+                        "the default global tier -- incompatible with "
+                        "--local_channels > 0 and --map_blind.")
+    p.add_argument("--backbone", type=str, default="unet", choices=["unet", "dit"],
+                   help="Denoiser backbone. 'unet' (default) is the existing "
+                        "Conv1d TemporalUnet family -- --global_film/"
+                        "--local_channels/--local_film/--map_blind all apply "
+                        "as before, nothing here changes that path. 'dit' is "
+                        "mapcond.dit_models.MapConditionalDiT1D: patchify "
+                        "tokenization + sinusoidal position embedding + "
+                        "adaLN-Zero conditioning (the Global-FiLM-equivalent "
+                        "tier only, for now -- incompatible with "
+                        "--global_film/--local_channels/--local_film).")
+    p.add_argument("--dit_hidden", type=int, default=256,
+                   help="DiT token width.")
+    p.add_argument("--dit_heads", type=int, default=8,
+                   help="DiT attention heads (head_dim = dit_hidden/dit_heads).")
+    p.add_argument("--dit_depth", type=int, default=4,
+                   help="Number of DiT blocks.")
+    p.add_argument("--dit_patch_size", type=int, default=4,
+                   help="Waypoints per token; --horizon must be divisible by "
+                        "this.")
+    p.add_argument("--dit_mlp_ratio", type=float, default=4.0,
+                   help="DiT block MLP hidden width, as a multiple of "
+                        "dit_hidden.")
     p.add_argument("--cfg_dropout", type=float, default=0.1,
                    help="Prob. of replacing the map embedding with the learned "
                         "null embedding during training (classifier-free "

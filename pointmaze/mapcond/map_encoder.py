@@ -3,10 +3,14 @@ MapEncoder: binary occupancy grid -> fixed-length embedding vector.
 
 A small conv stack followed by adaptive average pooling makes the encoder
 size-agnostic: any HxW grid collapses to the same [B, out_dim] embedding, so
-one encoder serves medium (8x8) through giant (12x16) without reshaping. The
-embedding is added to the diffusion time embedding (global FiLM-style
-conditioning), which the existing ResidualTemporalBlock then broadcasts across
-the whole horizon -- reusing the conditioning pathway already in the UNet.
+one encoder serves medium (8x8) through giant (12x16) without reshaping. By
+default (mapcond.models.MapConditionalTemporalUnet) the embedding is ADDED to
+the diffusion time embedding, which the existing ResidualTemporalBlock then
+broadcasts across the whole horizon as one shared bias -- reusing the
+conditioning pathway already in the UNet. This is additive, not FiLM: it can
+shift feature values but not scale/gate them. mapcond.global_film_models.
+GlobalFiLMTemporalUnet reuses this same encoder but injects its output via
+zero-initialized FiLM at every residual block instead.
 """
 import torch
 import torch.nn as nn

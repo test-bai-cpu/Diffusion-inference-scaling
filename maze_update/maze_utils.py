@@ -3,7 +3,7 @@ maze_utils.py
 =============
 
 Maze map definitions, task definitions, coordinate utilities, and BFS
-pathfinding. Used as a data/utility module by generate_data_ood.py.
+pathfinding. Used as a data/utility module by reroute_disruption.py.
 """
 
 from __future__ import annotations
@@ -13,57 +13,77 @@ import numpy as np
 
 
 # ===========================================================================
-# MAZE MAPS  (parsed live from ogbench/locomaze/maze.py -- the single source of
-# truth -- instead of a hand-copied duplicate that could silently drift)
+# MAZE MAPS  (verbatim from ogbench/locomaze/maze.py)
 # ===========================================================================
-import ast as _ast
-import os as _os
 
-_HERE = _os.path.dirname(_os.path.abspath(__file__))
-_REPO = _os.path.dirname(_HERE)
-MAZE_PY = _os.path.join(_REPO, "pointmaze", "ogbench", "ogbench",
-                        "locomaze", "maze.py")
+ULTRA_MAZE = [
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1],
+    [1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 1, 1, 1, 0, 1],
+    [1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1],
+    [1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 0, 1, 1, 1],
+    [1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1],
+    [1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 1, 0, 1],
+    [1, 0, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1],
+    [1, 1, 1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 1, 0, 1, 0, 1, 1, 1, 0, 1],
+    [1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1],
+    [1, 0, 1, 1, 1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1],
+    [1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1],
+    [1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 1, 0, 1, 0, 1, 1, 1, 0, 1],
+    [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1],
+    [1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1, 0, 1, 0, 1],
+    [1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1],
+    [1, 0, 1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1],
+    [1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+    [1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 1],
+    [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+]
 
+GIANT_MAZE = [
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 0, 1, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 1],
+    [1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 0, 1, 1, 0, 1],
+    [1, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1],
+    [1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 0, 1, 0, 1],
+    [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1],
+    [1, 1, 1, 0, 1, 0, 1, 0, 0, 1, 0, 1, 0, 1, 1, 1],
+    [1, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1],
+    [1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 0, 1, 0, 1],
+    [1, 0, 1, 1, 1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 1],
+    [1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+]
 
-def parse_maze_maps(maze_py_path=MAZE_PY):
-    """Return {maze_type: [[...]]} for every maze type defined in ogbench
-    maze.py. The literals are locals inside the env __init__ if/elif chain
-    (`if self._maze_type == '<t>': ... maze_map = [[...]]`), so they can't be
-    imported; we walk the AST and lift each maze_map assignment out of its
-    matching branch. This keeps every downstream map locked to the upstream
-    definition rather than a cached copy.
-    """
-    if not _os.path.exists(maze_py_path):
-        raise FileNotFoundError(
-            f"ogbench maze.py not found at {maze_py_path}; cannot read the "
-            f"authoritative maze definitions.")
-    tree = _ast.parse(open(maze_py_path).read())
-    maps = {}
-    for node in _ast.walk(tree):
-        if isinstance(node, _ast.If) and isinstance(node.test, _ast.Compare):
-            types = [c.value for c in node.test.comparators
-                     if isinstance(c, _ast.Constant) and isinstance(c.value, str)]
-            if not types:
-                continue
-            for stmt in node.body:
-                if isinstance(stmt, _ast.Assign) and any(
-                        getattr(t, "id", None) == "maze_map" for t in stmt.targets):
-                    try:
-                        maps[types[0]] = _ast.literal_eval(stmt.value)
-                    except Exception:
-                        pass
-    if not maps:
-        raise RuntimeError(f"no maze_map literals found in {maze_py_path}")
-    return maps
+MEDIUM_MAZE = [
+    [1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 0, 0, 1, 1, 0, 0, 1],
+    [1, 0, 0, 1, 0, 0, 0, 1],
+    [1, 1, 0, 0, 0, 1, 1, 1],
+    [1, 0, 0, 1, 0, 0, 0, 1],
+    [1, 0, 1, 0, 0, 1, 0, 1],
+    [1, 0, 0, 0, 1, 0, 0, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1],
+]
 
+LARGE_MAZE = [
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1],
+    [1, 0, 1, 1, 0, 1, 0, 1, 0, 1, 0, 1],
+    [1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1],
+    [1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 0, 1],
+    [1, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1],
+    [1, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1, 1],
+    [1, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+]
 
-MAZE_MAPS = parse_maze_maps()
-
-# Back-compat named constants (same values, now sourced from maze.py).
-MEDIUM_MAZE = MAZE_MAPS.get("medium")
-LARGE_MAZE = MAZE_MAPS.get("large")
-GIANT_MAZE = MAZE_MAPS.get("giant")
-ULTRA_MAZE = MAZE_MAPS.get("ultra")
+MAZE_MAPS = {
+    "medium": MEDIUM_MAZE,
+    "large":  LARGE_MAZE,
+    "giant":  GIANT_MAZE,
+    "ultra":  ULTRA_MAZE,
+}
 
 MAZE_TASKS = {
     "medium": {

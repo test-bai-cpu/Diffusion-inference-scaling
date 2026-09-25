@@ -66,8 +66,10 @@ def load_mapcond_diffusion(ckpt_path, device="cpu", use_ema=True, horizon=None,
     """
     Rebuild a map-conditional diffusion model from a train_multimap checkpoint.
 
-    Returns (diffusion, normalizer, config). `diffusion.model` is the
-    MapConditionalTemporalUnet; call bind_env_map(diffusion.model, env, ...)
+    Returns (diffusion, normalizer, config). `diffusion.model` is one of the
+    mapcond backbone classes (MapConditionalTemporalUnet / GlobalFiLMTemporalUnet
+    / *LocalMapConditionalTemporalUnet / MapConditionalDiT1D, selected from the
+    checkpoint's config); call bind_env_map(diffusion.model, env, ...)
     before rolling out each task. `horizon` overrides the sampling horizon
     (the repo sets diffusion.horizon = sampling_horizon at inference).
     """
@@ -81,26 +83,44 @@ def load_mapcond_diffusion(ckpt_path, device="cpu", use_ema=True, horizon=None,
     cfg_dropout = cfg.get("cfg_dropout", 0.0)
 
     local_k = int(cfg.get("local_channels", 0))
-    if local_k > 0:
-        if cfg.get("local_film", False):
-            from mapcond.film_models import FiLMLocalMapConditionalTemporalUnet
-            model_cls = FiLMLocalMapConditionalTemporalUnet
-        else:
-            from mapcond.models import LocalMapConditionalTemporalUnet
-            model_cls = LocalMapConditionalTemporalUnet
-        extra = {"local_channels": local_k}
+    if cfg.get("backbone", "unet") == "dit":
+        from mapcond.dit_models import MapConditionalDiT1D
+        model = MapConditionalDiT1D(
+            horizon=cfg["horizon"],
+            transition_dim=cfg["transition_dim"],
+            cond_dim=cfg["observation_dim"],
+            hidden=cfg.get("dit_hidden", 256),
+            heads=cfg.get("dit_heads", 8),
+            depth=cfg.get("dit_depth", 4),
+            patch_size=cfg.get("dit_patch_size", 4),
+            mlp_ratio=cfg.get("dit_mlp_ratio", 4.0),
+            pool_size=pool_size,
+            cfg_dropout=cfg_dropout,
+        )
     else:
-        model_cls, extra = MapConditionalTemporalUnet, {}
-    model = model_cls(
-        horizon=cfg["horizon"],
-        transition_dim=cfg["transition_dim"],
-        cond_dim=cfg["observation_dim"],
-        dim=cfg["dim"],
-        dim_mults=tuple(cfg["dim_mults"]),
-        **extra,
-        pool_size=pool_size,
-        cfg_dropout=cfg_dropout,
-    )
+        if cfg.get("global_film", False):
+            from mapcond.global_film_models import GlobalFiLMTemporalUnet
+            model_cls, extra = GlobalFiLMTemporalUnet, {}
+        elif local_k > 0:
+            if cfg.get("local_film", False):
+                from mapcond.film_models import FiLMLocalMapConditionalTemporalUnet
+                model_cls = FiLMLocalMapConditionalTemporalUnet
+            else:
+                from mapcond.models import LocalMapConditionalTemporalUnet
+                model_cls = LocalMapConditionalTemporalUnet
+            extra = {"local_channels": local_k}
+        else:
+            model_cls, extra = MapConditionalTemporalUnet, {}
+        model = model_cls(
+            horizon=cfg["horizon"],
+            transition_dim=cfg["transition_dim"],
+            cond_dim=cfg["observation_dim"],
+            dim=cfg["dim"],
+            dim_mults=tuple(cfg["dim_mults"]),
+            **extra,
+            pool_size=pool_size,
+            cfg_dropout=cfg_dropout,
+        )
     diffusion = MapConditionalGaussianDiffusion(
         model,
         horizon=cfg["horizon"],
