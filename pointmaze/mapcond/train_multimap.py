@@ -332,34 +332,52 @@ def train(args):
 
 
 def _film_norm(diffusion):
-    """Total weight norm of all FiLM output projections, or None for non-FiLM
-    models. film_out is the only zero-initialized layer in either FiLM branch
-    (local: mapcond.film_models.FiLMBlockWrap; global:
-    mapcond.global_film_models.GlobalFiLMBlockWrap -- their other internal
-    layers are normally initialized, since film_out being zero already
-    guarantees gamma=beta=0 at init regardless of what feeds it) -- growth
-    from zero is the direct evidence that the network is starting to USE the
-    conditioning signal; a norm stuck near zero after hundreds of thousands
-    of steps means the pathway is being ignored."""
+    """Total weight norm of all zero-initialized conditioning-gate
+    projections, or None for backbones that have none. Same diagnostic across
+    three different mechanisms, all zero-init at construction so gamma=beta=0
+    (or shift=scale=gate=0) regardless of what feeds them:
+      * local FiLM:  mapcond.film_models.FiLMBlockWrap.film_out
+      * global FiLM: mapcond.global_film_models.GlobalFiLMBlockWrap.film_out
+      * DiT adaLN-Zero: mapcond.dit1d.DiTBlock1d / FinalLayer1d's
+        adaLN_modulation[-1] -- architecturally the same trick (Peebles & Xie
+        zero-init the final adaLN linear so a fresh block starts as an exact
+        identity), just applied to tokens instead of conv channels.
+    Growth from zero is the direct evidence that the network is starting to
+    USE the conditioning signal (time embedding AND map embedding are summed
+    into the same vector before any of these gates, in every mechanism above,
+    so this cannot separate "using time" from "using the map" -- it can only
+    tell you the combined pathway isn't being ignored); a norm stuck near zero
+    after hundreds of thousands of steps means the pathway is being ignored."""
+    # (class, accessor) pairs: accessor(m) -> the zero-init nn.Linear/Conv1d to
+    # measure. Kept as callables rather than a fixed attribute name because the
+    # U-Net wraps store it directly (m.film_out) while the DiT blocks store it
+    # inside a Sequential (m.adaLN_modulation[-1]).
     wrap_classes = []
     try:
         from mapcond.film_models import FiLMBlockWrap
-        wrap_classes.append(FiLMBlockWrap)
+        wrap_classes.append((FiLMBlockWrap, lambda m: m.film_out))
     except Exception:
         pass
     try:
         from mapcond.global_film_models import GlobalFiLMBlockWrap
-        wrap_classes.append(GlobalFiLMBlockWrap)
+        wrap_classes.append((GlobalFiLMBlockWrap, lambda m: m.film_out))
+    except Exception:
+        pass
+    try:
+        from mapcond.dit1d import DiTBlock1d, FinalLayer1d
+        wrap_classes.append((DiTBlock1d, lambda m: m.adaLN_modulation[-1]))
+        wrap_classes.append((FinalLayer1d, lambda m: m.adaLN_modulation[-1]))
     except Exception:
         pass
     if not wrap_classes:
         return None
     total, found = 0.0, False
     for m in diffusion.modules():
-        if isinstance(m, tuple(wrap_classes)):
-            found = True
-            total += float(m.film_out.weight.norm()) + \
-                     float(m.film_out.bias.norm())
+        for cls, get_layer in wrap_classes:
+            if isinstance(m, cls):
+                found = True
+                layer = get_layer(m)
+                total += float(layer.weight.norm()) + float(layer.bias.norm())
     return total if found else None
 
 
