@@ -172,6 +172,50 @@ class BasePipe:
         json.dump(json_data, open(json_path, 'w'), indent=2, sort_keys=True)
         extras['total_reward'] = total_reward
 
+        # Per-episode failure-mode attribution from the search method, if it
+        # exposes one (adaptive_dfs does). Without this the mode counts are
+        # computed and thrown away, and METRIC_COLS' collision_rate /
+        # cornercut_rate / deadend_frac stay empty in results_detailed_*.csv.
+        #
+        # NOTE: eval() rescales any aggregated value <= 1 by 100, so a mode
+        # count that averages below 1 per episode would be silently inflated.
+        # Report FRACTIONS of rejections per mode (always in [0, 1]) and let
+        # that rescaling turn them into honest percentages.
+        summary_fn = getattr(self.guidance, 'summary', None)
+        if callable(summary_fn):
+            try:
+                s = summary_fn() or {}
+            except Exception:
+                s = {}
+            # Prefix-agnostic: adaptive_dfs emits adfs_*, staged_dfs emits
+            # sdfs_*. Match on the suffix so a new method file does not have to
+            # edit this block.
+            def _mode_count(suffix):
+                for k, v in s.items():
+                    if k.endswith(suffix):
+                        return float(v)
+                return 0.0
+
+            n_route = _mode_count('_n_route')
+            n_local = _mode_count('_n_local')
+            n_dead  = _mode_count('_n_dead_end')
+            n_tot   = n_route + n_local + n_dead
+            if n_tot > 0:
+                extras['collision_rate'] = n_local / n_tot   # local-repair share
+                extras['cornercut_rate'] = n_route / n_tot   # re-route share
+                extras['deadend_frac']   = n_dead  / n_tot
+            for k, v in s.items():
+                if '_nfe_' in k:
+                    extras[k] = float(v)
+            # Budget pressure, per episode. Previously recoverable only by
+            # parsing verbose log text, which is why the 6-cell adfs comparison
+            # had to grep for it. Suffix-matched so a new method file inherits it.
+            for suffix in ('_forced_best', '_budget_exhausted', '_rejections'):
+                for k, v in s.items():
+                    if k.endswith(suffix):
+                        extras[k] = float(v)
+                        break
+
         return extras
 
 

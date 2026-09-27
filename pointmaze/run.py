@@ -3,7 +3,7 @@ from search.script_utils import get_pipe, get_args
 
 def main(dataset: str="pointmaze-giant-navigate-v0", method: str='dfs', device: str="cuda:7", version: str='',
          task=None, maze_json_dir: str='', maze_variant_idx: int=0, run_tag: str='',
-         num_samples: int=40,
+         num_samples: int=40, write_detailed_csv: bool=False,
          use_distance_field: bool=False, dist_omega: float=1.0, dist_mode: str='sum',
          dist_smooth_sigma: float=0.5, dist_connectivity: int=4,
          maze_weight: float=1.0, dist_weight: float=1.0,
@@ -11,6 +11,7 @@ def main(dataset: str="pointmaze-giant-navigate-v0", method: str='dfs', device: 
          verifier_monitor: bool=False, verifier_monitor_freq: int=1,
          dfs_threshold_base: float=None, dfs_threshold_shape: str='current',
          dfs_trans_threshold: float=None, dfs_local_renoise: int=0,
+         adfs: str='', sdfs: str='',
          use_map_cond: bool=False, map_cond_ckpt: str='', map_cond_use_ema: bool=True, map_cond_guidance: float=0.0):
     args = Arguments()
     args.device = device
@@ -37,6 +38,8 @@ def main(dataset: str="pointmaze-giant-navigate-v0", method: str='dfs', device: 
     args.dfs_threshold_shape = dfs_threshold_shape
     args.dfs_trans_threshold = dfs_trans_threshold
     args.dfs_local_renoise = dfs_local_renoise
+    args.adfs = adfs
+    args.sdfs = sdfs
     args.use_map_cond = use_map_cond
     args.map_cond_ckpt = map_cond_ckpt
     args.map_cond_use_ema = map_cond_use_ema
@@ -59,27 +62,31 @@ def main(dataset: str="pointmaze-giant-navigate-v0", method: str='dfs', device: 
             f.write(f"Maze: {args.dataset} | Run: {run_str} | Compute: {average_compute} | Success Rate: {success_rate}\n")
 
         # ---- detailed per-task metrics CSV (success separated from failure modes) ----
-        detailed_file = f'results_detailed{_tag}.csv'
-        write_header = not _os.path.exists(detailed_file)
-        tasks = [t for t in returns.keys() if t != 'average']
-        with open(detailed_file, 'a', newline='') as f:
-            w = csv.writer(f)
-            if write_header:
-                w.writerow(['dataset', 'method', 'run', 'maze_json_dir',
-                            'maze_variant_idx', 'task'] + METRIC_COLS)
-            for task_id in tasks:
-                r = returns[task_id]
-                row = [args.dataset, args.method, run_str,
-                       getattr(args, 'maze_json_dir', ''),
-                       getattr(args, 'maze_variant_idx', 0), task_id]
-                row += [r.get(c, '') for c in METRIC_COLS]
-                w.writerow(row)
-            # average row
-            a = returns['average']
-            w.writerow([args.dataset, args.method, run_str,
-                        getattr(args, 'maze_json_dir', ''),
-                        getattr(args, 'maze_variant_idx', 0), 'average']
-                       + [a.get(c, '') for c in METRIC_COLS])
+        # Opt-in via --write_detailed_csv (default off): nothing in the current
+        # pipeline reads this file back in, it's purely a forensic artifact for
+        # later per-episode analysis (e.g. the sdfs door-bias investigation).
+        if write_detailed_csv:
+            detailed_file = f'results_detailed{_tag}.csv'
+            write_header = not _os.path.exists(detailed_file)
+            tasks = [t for t in returns.keys() if t != 'average']
+            with open(detailed_file, 'a', newline='') as f:
+                w = csv.writer(f)
+                if write_header:
+                    w.writerow(['dataset', 'method', 'run', 'maze_json_dir',
+                                'maze_variant_idx', 'task'] + METRIC_COLS)
+                for task_id in tasks:
+                    r = returns[task_id]
+                    row = [args.dataset, args.method, run_str,
+                           getattr(args, 'maze_json_dir', ''),
+                           getattr(args, 'maze_variant_idx', 0), task_id]
+                    row += [r.get(c, '') for c in METRIC_COLS]
+                    w.writerow(row)
+                # average row
+                a = returns['average']
+                w.writerow([args.dataset, args.method, run_str,
+                            getattr(args, 'maze_json_dir', ''),
+                            getattr(args, 'maze_variant_idx', 0), 'average']
+                           + [a.get(c, '') for c in METRIC_COLS])
 
 
 if __name__ == "__main__":
@@ -93,7 +100,7 @@ if __name__ == "__main__":
     parser.add_argument('--method', 
                         type=str, 
                         default='bon', 
-                        choices=['dfs', 'bon', 'bfs-resampling', 'bfs-pruning'],
+                        choices=['sdfs', 'adfs', 'dfs', 'bon', 'bfs-resampling', 'bfs-pruning'],
                         help='Search method to use')
     parser.add_argument('--device',
                         type=str,
@@ -124,7 +131,12 @@ if __name__ == "__main__":
                         type=int,
                         default=40,
                         help='Number of DFS/BFS rollouts to run per task. Use 1 for a quick trajectory generation check.')
-    
+    parser.add_argument('--write_detailed_csv',
+                        action='store_true', default=False,
+                        help='Also write results_detailed<run_tag>.csv (per-task failure-mode '
+                             'columns). Off by default -- nothing in the pipeline reads it back '
+                             'in; it is a forensic artifact for later per-episode analysis.')
+
     # BFS distance field guidance
     parser.add_argument('--use_distance_field',
                         action='store_true', default=False,
@@ -183,6 +195,24 @@ if __name__ == "__main__":
                         help='On rejection, re-noise only violating timesteps dilated by this '
                              'many positions instead of the whole trajectory. 0 (default) = '
                              'legacy whole-trajectory re-noise.')
+    parser.add_argument('--adfs',
+                        type=str, default='',
+                        help='Config for --method adfs (adaptive-backtracking DFS), as a single '
+                             'comma-separated key=value string, e.g. '
+                             '"route_depth=full,local_max_depth=4,nfe_budget=320,verbose=true". '
+                             'Valid keys are the fields of '
+                             'search.methods.adaptive_dfs.AdaptiveDFSConfig; an unknown key is '
+                             'a hard error rather than a silent no-op. Ignored by other methods.')
+    parser.add_argument('--sdfs',
+                        type=str, default='',
+                        help='Config for --method sdfs (staged-acceptance DFS), as a single '
+                             'comma-separated key=value string, e.g. '
+                             '"route_depth=12,local_max_depth=8,nfe_budget=480,verbose=true". '
+                             'Valid keys are the fields of '
+                             'search.methods.staged_dfs.StagedDFSConfig; an unknown key is '
+                             'a hard error rather than a silent no-op. Ignored by other methods. '
+                             'Note route_segment_count does NOT exist here (deleted, not '
+                             'retuned) -- passing it is an error, by design.')
     parser.add_argument('--use_map_cond',
                         action='store_true', default=False,
                         help='Use a map-conditional diffusion checkpoint from mapcond.train_multimap.')
@@ -203,6 +233,7 @@ if __name__ == "__main__":
          maze_json_dir=cli_args.maze_json_dir, maze_variant_idx=cli_args.maze_variant_idx,
          run_tag=cli_args.run_tag,
          num_samples=cli_args.num_samples,
+         write_detailed_csv=cli_args.write_detailed_csv,
          use_distance_field=cli_args.use_distance_field,
          dist_omega=cli_args.dist_omega,
          dist_mode=cli_args.dist_mode,
@@ -218,6 +249,8 @@ if __name__ == "__main__":
          dfs_threshold_shape=cli_args.dfs_threshold_shape,
          dfs_trans_threshold=cli_args.dfs_trans_threshold,
          dfs_local_renoise=cli_args.dfs_local_renoise,
+         adfs=cli_args.adfs,
+         sdfs=cli_args.sdfs,
          use_map_cond=cli_args.use_map_cond,
          map_cond_ckpt=cli_args.map_cond_ckpt,
          map_cond_use_ema=cli_args.map_cond_use_ema,

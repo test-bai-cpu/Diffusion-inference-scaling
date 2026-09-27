@@ -12,7 +12,8 @@ cd "$(dirname "$0")"
 # To run every level, change `2 3` below to `0 1 2 3`.
 
 method="dfs"
-run_tag="film-w2-omega05-base3-noise-trans40"
+# run_tag="film-w2-omega05-base3-noise-trans40"
+run_tag="global-w2-omega05-base3-noise-trans40"
 log_dir="logs/run_outputs"
 mkdir -p "${log_dir}"
 
@@ -39,14 +40,14 @@ for task in 1 2 3 4 5; do
         --task "${task}" \
         --num_samples 40 \
         --use_map_cond \
-        --map_cond_ckpt logs/mapcond-mazev1-seed2-film/variants_train_giant/state_500000.pt \
+        --map_cond_ckpt logs/mapcond-mazev1-seed2-feature/variants_train_giant/state_500000.pt \
         --run_tag "${run_tag}" \
         --map_cond_guidance 2 \
         --device cuda \
         --corner_radius_frac 0.25 \
         --corner_transition_weight 10.0 \
         --verifier_monitor \
-        --verifier_monitor_freq 1 \
+        --verifier_monitor_freq 10 \
         --use_distance_field \
         --dist_mode sum \
         --dist_omega 0.5 \

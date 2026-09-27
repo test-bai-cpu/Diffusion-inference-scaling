@@ -45,6 +45,7 @@ class DistanceFieldVerifier:
         # Cache: keyed on goal_ij tuple
         self._cached_goal_ij = None
         self._D_tensor       = None
+        self._D_raw_tensor   = None
 
     # ------------------------------------------------------------------
     # Public interface
@@ -60,6 +61,7 @@ class DistanceFieldVerifier:
         # Invalidate cache — maze topology may have changed
         self._cached_goal_ij = None
         self._D_tensor       = None
+        self._D_raw_tensor   = None
 
     def get_guidance(self, x, func=lambda x: x, post_process=lambda x: x,
                      return_logp=False, check_grad=True, **kwargs):
@@ -137,6 +139,18 @@ class DistanceFieldVerifier:
         self._D_tensor = (
             torch.tensor(D_fin, dtype=torch.float32, device=self.device)
             .unsqueeze(0).unsqueeze(0)              # (1, 1, H, W)
+        )
+        # Unsmoothed field, in true BFS cells, walls/unreachable = inf.
+        # _D_tensor is blurred against a 1000.0 wall sentinel, which in a
+        # narrow-corridor maze inflates every free cell near a wall by
+        # O(100) cells -- it reads 202 at the goal instead of 0. That is
+        # harmless for this verifier (it clamps to per-step INCREASES, so the
+        # offset largely cancels and episode ranking is preserved) but it must
+        # not be read as an absolute distance. Consumers that need real cell
+        # counts -- e.g. adaptive_dfs's route/local classifier -- read this.
+        self._D_raw_tensor = (
+            torch.tensor(D, dtype=torch.float32, device=self.device)
+            .unsqueeze(0).unsqueeze(0)              # (1, 1, H, W), may hold inf
         )
 
     def _xy_to_ij(self, x, y):

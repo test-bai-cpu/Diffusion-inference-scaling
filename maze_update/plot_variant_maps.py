@@ -1,21 +1,21 @@
 #!/usr/bin/env python
 """
-Re-plot the saved maze variants in ``maze_variants_v2/`` using the SAME contact-
-sheet convention as ``generate_variants._plot_ladder`` (the one that produced
-variant_ladder.png), but driven entirely from the saved JSON -- no regeneration.
+Re-plot the saved maze variants as one contact sheet, driven entirely from the
+saved JSON -- no regeneration. Works against `reroute_disruption.py`'s RDI
+output (``maze_variants/``, ``maze_variants_seed{N}/``).
 
-Rendering convention (identical to _plot_ladder):
+Rendering convention:
     * origin='lower'  -> maze row 0 at the BOTTOM, y increasing upward
-      (world-coordinate framing, matching reroute_disruption.plot_suite).
-    * blue line   : forced optimal path (recomputed from the map with
-                    difficulty_metric.optimal_path_cells).
+      (matches reroute_disruption.plot_suite's world-coordinate framing).
+    * blue line   : shortest start->goal path on the edited maze
+                    (maze_utils.shortest_path).
     * red block   : an added wall (broken_cells).
-    * teal outline: an opened wall (opened_cells).
+    * teal outline: an opened wall (derived: free in maze_map, wall in base_maze).
     * green dot   : start,  gold star : goal.
-    * caption per cell: d{difficulty_score}  +{n_blocked}b / -{n_opened}o.
+    * caption per cell: rdi{rdi}  +{n_broken}b / -{n_opened}o.
 
 Usage:
-    python plot_variant_maps.py                         # -> variant_ladder_v2.png (all tasks)
+    python plot_variant_maps.py                         # -> variant_ladder.png (all tasks)
     python plot_variant_maps.py --out sheet.png
     python plot_variant_maps.py --tasks 1,3             # subset of tasks
     python plot_variant_maps.py --per-task              # one PNG per task instead of one sheet
@@ -32,18 +32,23 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
-# make sibling modules (difficulty_metric, maze_utils) importable regardless of cwd
+# make sibling modules (maze_utils) importable regardless of cwd
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import difficulty_metric as dm
+from maze_utils import shortest_path
 
 
 def _load(vdir, task):
     return json.load(open(os.path.join(vdir, f"giant_{task}.json")))
 
 
-def _draw_cell(ax, v, start, goal, H, W):
-    """Render one variant into ax, matching _plot_ladder exactly."""
+def _levels(data):
+    """Sorted distinct target_level values -> 0-based level index."""
+    return sorted(set(v["target_level"] for v in data["variants"]))
+
+
+def _draw_cell(ax, v, base, start, goal, H, W):
+    """Render one variant into ax."""
     ax.set_xticks([]); ax.set_yticks([])
     grid = np.array(v["maze_map"])
     ax.imshow(grid, cmap="Greys", vmin=0, vmax=1, origin="lower")
@@ -52,25 +57,27 @@ def _draw_cell(ax, v, start, goal, H, W):
     for (bi, bj) in v["broken_cells"]:                       # added walls
         ax.add_patch(Rectangle((bj - .5, bi - .5), 1, 1,
                                color="#d1495b", alpha=.85, zorder=3))
-    for (oi, oj) in v.get("opened_cells", []):               # opened walls
+    opened = list(zip(*np.where((grid == 0) & (base == 1))))  # opened walls
+    for (oi, oj) in opened:
         ax.add_patch(Rectangle((oj - .5, oi - .5), 1, 1,
                                facecolor="none", edgecolor="#2a9d8f",
                                lw=1.8, zorder=3))
-    path = dm.optimal_path_cells(grid, tuple(start), tuple(goal))
+    path = shortest_path(grid, tuple(start), tuple(goal))
     if path:
         pi = [p[0] for p in path]; pj = [p[1] for p in path]
         ax.plot(pj, pi, color="#1f6feb", lw=1.6, zorder=4)
     ax.plot(start[1], start[0], "o", color="#2e7d32", ms=5, zorder=5)
     ax.plot(goal[1], goal[0], "*", color="#f0a202", ms=9, zorder=5)
     ax.text(0.5, -0.02,
-            f"d{v['difficulty_score']:.2f} +{v['n_blocked']}b/-{v.get('n_opened', 0)}o",
+            f"rdi{v['rdi']:.2f} +{v['n_broken']}b/-{v['n_opened']}o",
             transform=ax.transAxes, ha="center", va="top", fontsize=6.5)
 
 
 def plot_sheet(vdir, tasks, out):
     """One row per task, one column per (level, variant) -- the full contact sheet."""
     d0 = _load(vdir, tasks[0])
-    n_lvl, n_var = d0["n_levels"], d0["n_variants"]
+    levels = _levels(d0)
+    n_lvl, n_var = len(levels), max(v["variant_index"] for v in d0["variants"]) + 1
     base = np.array(d0["base_maze"])
     H, W = base.shape
     ncols = n_lvl * n_var
@@ -78,8 +85,11 @@ def plot_sheet(vdir, tasks, out):
                              figsize=(1.7 * ncols, 2.0 * len(tasks)), squeeze=False)
     for r, t in enumerate(tasks):
         data = _load(vdir, t)
-        start, goal = data["start"], data["goal"]
-        cells = {(v["level_index"], v["variant_index"]): v for v in data["variants"]}
+        v0 = data["variants"][0]
+        start, goal = v0["start"], v0["goal"]
+        lvl_of = {L: i for i, L in enumerate(_levels(data))}
+        cells = {(lvl_of[v["target_level"]], v["variant_index"]): v
+                 for v in data["variants"]}
         col = 0
         for lv in range(n_lvl):
             for vi in range(n_var):
@@ -87,12 +97,12 @@ def plot_sheet(vdir, tasks, out):
                 v = cells.get((lv, vi))
                 if v is None:
                     ax.axis("off"); continue
-                _draw_cell(ax, v, start, goal, H, W)
+                _draw_cell(ax, v, base, start, goal, H, W)
                 if r == 0:
                     ax.set_title(f"L{lv+1}.{vi+1}", fontsize=9)
                 if col - 1 == 0:
                     ax.set_ylabel(t, fontsize=10)
-    fig.suptitle("Variant ladder (row 0 at bottom): forced optimal path (blue), added walls (red), "
+    fig.suptitle("Variant ladder (row 0 at bottom): shortest path (blue), added walls (red), "
                  "opened walls (teal outline), start (green dot), goal (gold star)\n"
                  "Columns grouped by level L1..L%d (each with %d path-distinct variants); "
                  "difficulty rises left->right" % (n_lvl, n_var),
@@ -105,11 +115,15 @@ def plot_sheet(vdir, tasks, out):
 def plot_per_task(vdir, task, out):
     """One PNG for a single task: rows = levels, cols = variants."""
     data = _load(vdir, task)
-    n_lvl, n_var = data["n_levels"], data["n_variants"]
+    levels = _levels(data)
+    n_lvl, n_var = len(levels), max(v["variant_index"] for v in data["variants"]) + 1
     base = np.array(data["base_maze"])
     H, W = base.shape
-    start, goal = data["start"], data["goal"]
-    cells = {(v["level_index"], v["variant_index"]): v for v in data["variants"]}
+    v0 = data["variants"][0]
+    start, goal = v0["start"], v0["goal"]
+    lvl_of = {L: i for i, L in enumerate(levels)}
+    cells = {(lvl_of[v["target_level"]], v["variant_index"]): v
+             for v in data["variants"]}
     fig, axes = plt.subplots(n_lvl, n_var,
                              figsize=(2.0 * n_var, 2.2 * n_lvl), squeeze=False)
     for lv in range(n_lvl):
@@ -118,7 +132,7 @@ def plot_per_task(vdir, task, out):
             v = cells.get((lv, vi))
             if v is None:
                 ax.axis("off"); continue
-            _draw_cell(ax, v, start, goal, H, W)
+            _draw_cell(ax, v, base, start, goal, H, W)
             if lv == 0:
                 ax.set_title(f"variant {vi+1}", fontsize=9)
             if vi == 0:
@@ -133,8 +147,8 @@ def plot_per_task(vdir, task, out):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--variants-dir", default="maze_variants_v2")
-    ap.add_argument("--out", default="variant_ladder_v2.png",
+    ap.add_argument("--variants-dir", default="maze_variants")
+    ap.add_argument("--out", default="variant_ladder.png",
                     help="output PNG (contact-sheet mode); ignored with --per-task")
     ap.add_argument("--tasks", default="1,2,3,4,5")
     ap.add_argument("--per-task", action="store_true",

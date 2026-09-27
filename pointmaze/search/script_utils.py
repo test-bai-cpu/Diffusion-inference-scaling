@@ -8,7 +8,13 @@ from typing import List
 
 
 def get_pipe(args: Arguments) -> BasePipe:
-    if args.method == 'dfs':
+    if args.method == 'sdfs':
+        from search.methods.staged_dfs import StagedDFSGuidance
+        guidance = StagedDFSGuidance(args=args)
+    elif args.method == 'adfs':
+        from search.methods.adaptive_dfs import AdaptiveDFSGuidance
+        guidance = AdaptiveDFSGuidance(args=args)
+    elif args.method == 'dfs':
         guidance = DFSGuidance(args=args)
     elif 'bfs' in args.method or 'bon' in args.method:
         guidance = BFSGuidance(args=args)

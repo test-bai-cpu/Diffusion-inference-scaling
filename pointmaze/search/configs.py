@@ -86,6 +86,19 @@ class Arguments:
     verifier_monitor: bool = field(default=False)    # print DFS verifier cost decomposition
     verifier_monitor_freq: int = field(default=1)    # print every N DFS verifier checks
 
+    # Adaptive-backtracking DFS (--method adfs). Deliberately ONE field: all
+    # knobs live in search.methods.adaptive_dfs.AdaptiveDFSConfig and are set
+    # from a single comma-separated key=value string, e.g.
+    #   --method adfs --adfs "route_depth=full,local_max_depth=4,nfe_budget=320"
+    # Adding a knob there must never add a field here.
+    adfs: str = field(default='')
+
+    # Staged-acceptance DFS (--method sdfs). Same one-field discipline: all
+    # knobs live in search.methods.staged_dfs.StagedDFSConfig, e.g.
+    #   --method sdfs --sdfs "route_depth=12,local_max_depth=8,nfe_budget=480"
+    # Adding a knob there must never add a field here.
+    sdfs: str = field(default='')
+
     # Map-conditional generator (mapcond). Opt-in; default off => unchanged repo.
     use_map_cond: bool = field(default=False)        # load a map-conditional ckpt and bind the env map
     map_cond_ckpt: str = field(default='')           # path to a train_multimap state_*.pt checkpoint

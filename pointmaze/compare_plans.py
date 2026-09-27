@@ -27,13 +27,15 @@ from PIL import Image, ImageDraw, ImageFont
 
 
 # Path templates. The leaf is always {run}/0.png
-MAP_GUIDANCE_ROOT_NAME = "pointmaze-giant-newvar-navigate-v0"
-DFS_ROOT_NAME = "pointmaze-giant-newvar-navigate-v0-dfs"
+# MAP_GUIDANCE_ROOT_NAME = "pointmaze-giant-newvar-navigate-v0"
+MAP_GUIDANCE_ROOT_NAME = "pointmaze-giant-newvar-navigate-v0_mazev1-cond-trainonv2"
+DFS_ROOT_NAME = "pointmaze-giant-newvar-navigate-v0-dfs-mazev1"
 INFERENCE_SUBPATH = "inference/plans/release_H400_T256_LimitsNormalizer_b1_condFalse"
 
 # Folder name patterns inside the inference/plans dir
 # map, guidance variant uses the "dfs, df, " prefix, plain dfs uses "dfs, " prefix
-MAP_FOLDER_RE = re.compile(r"^dfs-df-task(\d+)-level(\d+)-variant(\d+)$")
+# MAP_FOLDER_RE = re.compile(r"^dfs-df-task(\d+)-level(\d+)-variant(\d+)$")
+MAP_FOLDER_RE = re.compile(r"^mazev1-trainonv2-cond_dfs-task(\d+)-level(\d+)-variant(\d+)$")
 DFS_FOLDER_RE = re.compile(r"^dfs-task(\d+)-level(\d+)-variant(\d+)$")
 
 
@@ -231,7 +233,7 @@ def main():
             title = f"MAP, GUIDANCE   {tag}   ({sum(p is not None for p in paths)}/{args.runs} runs)"
             grid = build_grid(paths, args.rows, args.cols, args.tile_width, args.tile_height,
                               title, start)
-            map_path = out_dir / f"{tag}__map_guidance.png"
+            map_path = out_dir / f"{tag}_mapcond.png"
             grid.save(map_path, optimize=True)
             print(f"  wrote {map_path.name}")
             map_img = grid
@@ -246,7 +248,7 @@ def main():
             title = f"DFS   {tag}   ({sum(p is not None for p in paths)}/{args.runs} runs)"
             grid = build_grid(paths, args.rows, args.cols, args.tile_width, args.tile_height,
                               title, start)
-            dfs_path = out_dir / f"{tag}__dfs.png"
+            dfs_path = out_dir / f"{tag}.png"
             grid.save(dfs_path, optimize=True)
             print(f"  wrote {dfs_path.name}")
             dfs_img = grid
