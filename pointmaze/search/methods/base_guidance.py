@@ -1,6 +1,7 @@
 from diffusers.utils.torch_utils import randn_tensor
 from search.configs import Arguments
 import torch
+import numpy as np
 from diffuser.models.helpers import apply_conditioning
 from search.maze_verifier import MazeVerifier
 from search.utils import rescale_grad
@@ -12,6 +13,7 @@ class BaseGuidance:
         self.args = args
         self.guider = self._build_verifier(args)
         self.generator = torch.manual_seed(self.args.seed)
+        np.random.seed(self.args.seed)
         self.device = torch.device(self.args.device)
         if noise_fn is None:
             def noise_fn (x, sigma, **kwargs):

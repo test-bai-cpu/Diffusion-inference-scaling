@@ -59,6 +59,47 @@ class MapConditionalDiT1D(DiT1D):
         # Optional episode-level bound grid (see bind_maze). None => map-blind
         # unless maze= is passed explicitly.
         self._bound_maze = None
+        # Optional CFG negative grid (see bind_negative_maze). None => the
+        # trained null embedding, i.e. exactly what cfg_dropout trained.
+        self._negative_maze = None
+
+    def bind_negative_maze(self, maze):
+        """
+        Bind a grid for the CFG negative pass in place of the learned null
+        embedding. Inference-only knob; nothing here is trained.
+
+        Why this exists: the conditioning probe (cond_sensitivity.py) shows
+        this model responds strongly to a cell being OPENED (+65pp) but barely
+        at all to one being CLOSED (-3pp) -- the training objective only ever
+        rewards reproducing valid paths, so the model learns affordance and
+        never prohibition. Standard CFG amplifies "conditional vs nothing",
+        which amplifies the affordance it already has. Binding the BASE map as
+        the negative instead makes guidance amplify "this variant vs the map
+        the prior is anchored to", which is exactly the closed-cell signal
+        being ignored.
+
+        MEASURED, AND IT DOES NOT WORK -- kept only so the dead end stays
+        documented. On task1/var7 at w=2, n=64, binding the base giant map as
+        the negative cut penetration of the two contested cells ((5,6)
+        59.4%->15.6%, (9,6) 37.5%->7.8%) but that was an artifact of the whole
+        distribution going diffuse: total verifier cost per plan went from
+        40.4 (standard CFG) to 131.6, worse even than no guidance at all
+        (58.0), with corner-transition cost up 6x. The probe metric fell
+        because plans started violating walls EVERYWHERE else, not because
+        they learned to route around these cells. Standard CFG (None) is the
+        best of the three settings measured.
+
+        None restores the standard null-embedding behaviour, bit-identical to
+        the trained CFG.
+        """
+        if maze is None:
+            self._negative_maze = None
+            return
+        maze = torch.as_tensor(maze, dtype=torch.float32)
+        if maze.dim() == 2:
+            maze = maze.unsqueeze(0)
+        dev = next(self.parameters()).device
+        self._negative_maze = maze.to(dev)
 
     def bind_maze(self, maze):
         """Same contract as MapConditionalTemporalUnet.bind_maze /
@@ -85,6 +126,16 @@ class MapConditionalDiT1D(DiT1D):
                fall back to a grid bound via bind_maze() (if any); otherwise
                the model is map-blind (pure-timestep adaLN, no map term).
         """
+        # Which samples had their map dropped this forward pass. Read back by
+        # MapConditionalGaussianDiffusion.p_losses so the collision penalty can
+        # skip them: a dropped sample was deliberately not shown the map, so
+        # penalizing it for that map's walls would train the null pathway to
+        # avoid walls generically. That is incoherent (there is no single map to
+        # be safe on) and it is actively harmful -- CFG's guidance direction is
+        # out_cond - out_null, so wall avoidance present in BOTH terms cancels,
+        # weakening exactly the signal guidance is supposed to amplify.
+        self._last_cfg_drop = None
+
         if maze is None and self._bound_maze is not None:
             maze = self._bound_maze.expand(x.shape[0], *self._bound_maze.shape[1:])
 
@@ -97,13 +148,19 @@ class MapConditionalDiT1D(DiT1D):
         if self.training and self.cfg_dropout > 0:
             drop = torch.rand(emb.shape[0], device=emb.device) < self.cfg_dropout
             emb = torch.where(drop[:, None], self.null_map_emb.unsqueeze(0), emb)
+            self._last_cfg_drop = drop
 
         c = c_time + self.map_mlp(emb)
         out = self._run_trunk(x, c)
 
         if (not self.training) and self.guidance_scale > 0:
-            null = self.null_map_emb.unsqueeze(0).expand(emb.shape[0], -1)
-            c_null = c_time + self.map_mlp(null)
+            neg = getattr(self, "_negative_maze", None)
+            if neg is None:
+                emb_neg = self.null_map_emb.unsqueeze(0).expand(emb.shape[0], -1)
+            else:
+                emb_neg = self.map_encoder(
+                    neg.expand(x.shape[0], *neg.shape[1:]))
+            c_null = c_time + self.map_mlp(emb_neg)
             out_null = self._run_trunk(x, c_null)
             out = (1 + self.guidance_scale) * out - self.guidance_scale * out_null
 

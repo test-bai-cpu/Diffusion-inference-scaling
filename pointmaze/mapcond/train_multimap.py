@@ -152,21 +152,114 @@ def build(args, dataset):
         clip_denoised=True,
         predict_epsilon=False,
     ).to(args.device)
+    if args.collision_weight > 0 or args.corner_weight > 0:
+        assert not args.map_blind, \
+            "--collision_weight/--corner_weight need the maze (map_blind passes maze=None)"
+        from mapcond import local_features as LF
+        lo, hi = dataset.normalizer.bounds["observations"]
+        scale, shift = LF.norm_xy_to_uv_affine(lo[:2], hi[:2], dataset.canvas_hw)
+        radius = args.corner_radius_frac * LF.MG.MAZE_UNIT
+        diffusion.set_collision_penalty(args.collision_weight, scale, shift,
+                                        corner_weight=args.corner_weight,
+                                        corner_radius=radius,
+                                        obs_min=lo[:2], obs_max=hi[:2])
+        print(f"[train_multimap] penalties: wall={args.collision_weight} "
+              f"corner={args.corner_weight} (radius={radius:.2f} world units)",
+              flush=True)
     return model, diffusion
 
 
-def build_map_specs(args):
-    """Build explicit specs when giant variants are requested."""
-    specs = DU.base_map_specs(args.maps)
+def build_map_specs(args, validation=None):
+    """Build explicit specs when giant variants are requested.
+
+    `validation` overrides args.variant_val and additionally swaps the base maps
+    to their `-val` twins, so the same call builds either the training set or
+    the held-out set over the SAME maps.
+    """
+    val = args.variant_val if validation is None else validation
+    specs = DU.base_map_specs(args.maps, validation=val)
     if args.variant_tasks:
         specs.extend(DU.giant_variant_map_specs(
             variant_dir=args.variant_dir,
             variant_json_dir=args.variant_json_dir,
             tasks=args.variant_tasks,
             vars=args.variant_vars,
-            validation=args.variant_val,
+            validation=val,
         ))
     return specs
+
+
+def build_val_loader(args, dataset):
+    """
+    Held-out loader over the `-val` twins of the very same maps.
+
+    OGBench and the variant generator both ship a disjoint 10% split (50
+    episodes vs 500) for every map already, so nothing has to be carved out of
+    the training set -- and unlike a window-level split of the training data,
+    these episodes share no overlap at all with what the model trains on. The
+    training normalizer is reused, never refit: a separately fitted one would
+    put the two sets in different coordinate frames.
+
+    A fixed random subset is drawn once so the reported number is a
+    deterministic function of the weights, not a different sample each time.
+    """
+    val_ds = MultiMazeGoalDataset(
+        map_specs=build_map_specs(args, validation=True),
+        horizon=args.horizon,
+        normalizer=dataset.normalizer,
+        canvas_hw=dataset.canvas_hw,
+        pad_anchor=dataset.pad_anchor,
+        max_episodes_per_map=args.max_episodes_per_map,
+        local_dist=(args.local_channels >= 2),
+    )
+    n = min(len(val_ds), args.val_batches * args.batch_size)
+    idx = np.random.RandomState(args.val_seed).choice(len(val_ds), n, replace=False)
+    subset = torch.utils.data.Subset(val_ds, sorted(idx.tolist()))
+    print(f"[train_multimap] val: {len(val_ds)} windows over {len(val_ds.map_ids)} "
+          f"maps, evaluating a fixed {n}", flush=True)
+    return torch.utils.data.DataLoader(
+        subset, batch_size=args.batch_size, shuffle=False,
+        num_workers=0, collate_fn=map_batch_collate)
+
+
+@torch.no_grad()
+def validate(diffusion, loader, args):
+    """
+    Mean loss on the held-out set. Returns (plain diffusion loss, penalties).
+
+    The plain diffusion term is reported separately because it is the only
+    number comparable ACROSS runs: the penalty weights differ between arms, so
+    a combined total cannot be lined up against a baseline.
+
+    Runs under eval() so CFG dropout does not fire (a validation number should
+    not depend on which samples randomly had their map hidden), and restores
+    the RNG afterwards so that turning validation on does not alter the
+    training trajectory by a single draw.
+    """
+    rng_state = torch.get_rng_state()
+    cuda_state = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+    torch.manual_seed(args.val_seed)
+    was_training = diffusion.training
+    diffusion.eval()
+
+    tot, pen_tot, n = 0.0, 0.0, 0
+    for batch in loader:
+        trajs = batch.trajectories.to(args.device)
+        cond = {k: v.to(args.device) for k, v in batch.conditions.items()}
+        maze = None if args.map_blind else batch.maze.to(args.device)
+        loss, info = diffusion.loss(trajs, cond, maze=maze)
+        pen = (args.collision_weight * float(info.get("collision", 0.0))
+               + args.corner_weight * float(info.get("corner", 0.0)))
+        tot += float(loss)
+        pen_tot += pen
+        n += 1
+
+    if was_training:
+        diffusion.train()
+    torch.set_rng_state(rng_state)
+    if cuda_state is not None:
+        torch.cuda.set_rng_state_all(cuda_state)
+    return (tot - pen_tot) / max(n, 1), pen_tot / max(n, 1)
 
 
 def save_ckpt(path, step, model, ema_model, dataset, args):
@@ -203,6 +296,11 @@ def save_ckpt(path, step, model, ema_model, dataset, args):
             "dit_depth": args.dit_depth,
             "dit_patch_size": args.dit_patch_size,
             "dit_mlp_ratio": args.dit_mlp_ratio,
+            "collision_weight": args.collision_weight,
+            "corner_weight": args.corner_weight,
+            "negative_weight": args.negative_weight,
+            "val_freq": args.val_freq,
+            "corner_radius_frac": args.corner_radius_frac,
             "canvas_hw": list(dataset.canvas_hw),
             "pad_anchor": dataset.pad_anchor,
             "transition_dim": dataset.transition_dim,
@@ -252,8 +350,25 @@ def train(args):
         collate_fn=map_batch_collate,
     ))
 
+    val_loader = build_val_loader(args, dataset) if args.val_freq > 0 else None
+
     # -------- model + ema + optim --------
     model, diffusion = build(args, dataset)
+    if args.init_from:
+        # Warm start: weights only. The optimizer, EMA schedule and step
+        # counter all start fresh, so this is "continue from these weights
+        # under a new objective", not a crash resume -- which is exactly what
+        # an ablation like --collision_weight wants, since it keeps the
+        # backbone fixed and changes one term.
+        _ck = torch.load(args.init_from, map_location=args.device, weights_only=False)
+        _state = _ck["ema"] if ("ema" in _ck and args.init_from_ema) else _ck["model"]
+        missing, unexpected = diffusion.load_state_dict(_state, strict=False)
+        assert not unexpected, f"unexpected keys in {args.init_from}: {unexpected}"
+        if missing:
+            print(f"[train_multimap] warm start: {len(missing)} missing keys "
+                  f"left at init, e.g. {missing[:4]}", flush=True)
+        print(f"[train_multimap] warm-started from {args.init_from} "
+              f"(step {_ck.get('step')}, ema={args.init_from_ema})", flush=True)
     ema = EMA(args.ema_decay)
     ema_model = copy.deepcopy(diffusion)
     ema_model.load_state_dict(diffusion.state_dict())
@@ -281,6 +396,19 @@ def train(args):
             cond = {k: v.to(args.device) for k, v in batch.conditions.items()}
             maze = None if args.map_blind else batch.maze.to(args.device)
             loss, info = diffusion.loss(trajs, cond, maze=maze)
+            if args.negative_weight > 0 and maze is not None:
+                from mapcond.collision import block_route_cell
+                _lo = torch.as_tensor(dataset.normalizer.bounds["observations"][0][:2],
+                                      device=args.device)
+                _hi = torch.as_tensor(dataset.normalizer.bounds["observations"][1][:2],
+                                      device=args.device)
+                xy_world = (trajs[..., 2:4] + 1) * 0.5 * (_hi - _lo) + _lo
+                maze_neg, nvalid, _ = block_route_cell(maze, xy_world)
+                if bool(nvalid.any()):
+                    nloss, ninfo = diffusion.negative_loss(
+                        trajs, cond, maze_neg, valid=nvalid)
+                    loss = loss + args.negative_weight * nloss
+                    info = {**info, **ninfo}
             (loss / args.gradient_accumulate_every).backward()
         opt.step()
 
@@ -291,26 +419,55 @@ def train(args):
             else:
                 ema.update(ema_model, diffusion)
 
-        if step % args.log_freq == 0:
+        val_loss = val_pen = None
+        if val_loader is not None and step % args.val_freq == 0:
+            val_loss, val_pen = validate(diffusion, val_loader, args)
+
+        if step % args.log_freq == 0 or val_loss is not None:
             loss_log.append((step, float(loss)))
             rate = (step + 1) / (time.time() - t0)
             film_norm = _film_norm(diffusion)
             film_str = f" | film {film_norm:9.5f}" if film_norm is not None else ""
+            coll = info.get("collision") if isinstance(info, dict) else None
+            coll = None if coll is None else float(coll)
+            corn = info.get("corner") if isinstance(info, dict) else None
+            corn = None if corn is None else float(corn)
+            neg = info.get("neg_collision") if isinstance(info, dict) else None
+            neg = None if neg is None else float(neg)
+            coll_str = f" | coll {coll:8.5f}" if coll is not None else ""
+            coll_str += f" | corn {corn:8.5f}" if corn is not None else ""
+            coll_str += f" | neg {neg:8.5f}" if neg is not None else ""
+            coll_str += f" | VAL {val_loss:8.5f}" if val_loss is not None else ""
             print(f"{step:>7d} | loss {float(loss):8.5f} | {rate:6.1f} it/s"
-                  f"{film_str}", flush=True)
+                  f"{film_str}{coll_str}", flush=True)
             # crash-safe incremental log, watchable while training runs
             _csv = os.path.join(args.savepath, "loss_log.csv")
             _new = not os.path.exists(_csv)
             with open(_csv, "a") as f:
                 if _new:
-                    f.write("step,loss,it_per_s,film_norm\n")
+                    f.write("step,loss,it_per_s,film_norm,collision,corner,"
+                            "neg_collision,val_loss,val_penalty\n")
                 f.write(f"{step},{float(loss):.6f},{rate:.3f},"
-                        f"{'' if film_norm is None else f'{film_norm:.6f}'}\n")
+                        f"{'' if film_norm is None else f'{film_norm:.6f}'},"
+                        f"{'' if coll is None else f'{coll:.6f}'},"
+                        f"{'' if corn is None else f'{corn:.6f}'},"
+                        f"{'' if neg is None else f'{neg:.6f}'},"
+                        f"{'' if val_loss is None else f'{val_loss:.6f}'},"
+                        f"{'' if val_pen is None else f'{val_pen:.6f}'}\n")
             if tb is not None:
                 tb.add_scalar("train/loss", float(loss), step)
                 tb.add_scalar("train/it_per_s", rate, step)
                 if film_norm is not None:
                     tb.add_scalar("train/film_norm", film_norm, step)
+                if coll is not None:
+                    tb.add_scalar("train/collision", coll, step)
+                if corn is not None:
+                    tb.add_scalar("train/corner", corn, step)
+                if neg is not None:
+                    tb.add_scalar("train/neg_collision", neg, step)
+                if val_loss is not None:
+                    tb.add_scalar("val/loss", val_loss, step)
+                    tb.add_scalar("val/penalty", val_pen, step)
 
         if step > 0 and step % args.save_freq == 0:
             save_ckpt(os.path.join(args.savepath, f"state_{step}.pt"),
@@ -469,6 +626,41 @@ def get_args(argv=None):
     p.add_argument("--dit_mlp_ratio", type=float, default=4.0,
                    help="DiT block MLP hidden width, as a multiple of "
                         "dit_hidden.")
+    p.add_argument("--init_from", type=str, default="",
+                   help="Warm start from a train_multimap checkpoint (weights "
+                        "only; fresh optimizer, EMA and step counter). Model "
+                        "config must match -- this loads weights, it does not "
+                        "rebuild the architecture from the checkpoint.")
+    p.add_argument("--init_from_ema", action="store_true", default=True,
+                   help="Warm start from the EMA weights (default) rather than "
+                        "the raw model weights.")
+    p.add_argument("--collision_weight", type=float, default=0.0,
+                   help="Weight of the differentiable wall-collision penalty on "
+                        "the predicted x0 (mapcond.collision). 0 (default) is "
+                        "off and leaves the loss bit-identical to before. The "
+                        "diffusion objective has no negative examples -- every "
+                        "demo is a legal path, so nothing otherwise penalizes "
+                        "putting a waypoint inside a wall.")
+    p.add_argument("--corner_weight", type=float, default=0.0,
+                   help="Weight of the corner-clearance penalty, a smooth "
+                        "counterpart of the DFS corner detectors (which are "
+                        "binary cell-index tests with no gradient). The wall "
+                        "term is blind to corner cuts: slipping through a "
+                        "diagonal pinch grazes both wall boxes with ~0 "
+                        "penetration. Separate from --collision_weight so the "
+                        "two failure modes stay separately attributable.")
+    p.add_argument("--negative_weight", type=float, default=0.0,
+                   help="Weight of the penalty-only pass on a perturbed map "
+                        "(mapcond.collision.block_route_cell closes a cell the "
+                        "trajectory runs through, manufacturing the exact OOD "
+                        "failure mode as a training case). 0 = off. Needs "
+                        "--collision_weight and/or --corner_weight to be set, "
+                        "since those are the terms it applies. Costs one extra "
+                        "forward/backward per step.")
+    p.add_argument("--corner_radius_frac", type=float, default=0.25,
+                   help="Clearance radius for --corner_weight, as a fraction of "
+                        "maze_unit. 0.25 matches the value run_global_film.sh "
+                        "and the DiT evals pass to the verifier.")
     p.add_argument("--cfg_dropout", type=float, default=0.1,
                    help="Prob. of replacing the map embedding with the learned "
                         "null embedding during training (classifier-free "
@@ -483,6 +675,18 @@ def get_args(argv=None):
     p.add_argument("--loss_type", type=str, default="l2")
     p.add_argument("--log_freq", type=int, default=100)
     p.add_argument("--save_freq", type=int, default=20000)
+    p.add_argument("--val_freq", type=int, default=5000,
+                   help="Evaluate the held-out `-val` twins of the training "
+                        "maps every N steps (0 disables). OGBench and the "
+                        "variant generator both ship a disjoint 50-episode "
+                        "split per map, so nothing is carved out of training. "
+                        "Side-effect free: runs under eval() and restores the "
+                        "RNG, so the training trajectory is unchanged.")
+    p.add_argument("--val_batches", type=int, default=4,
+                   help="Batches per validation pass. A fixed random subset is "
+                        "drawn once, so the number is comparable across steps.")
+    p.add_argument("--val_seed", type=int, default=0,
+                   help="Seed for choosing the validation subset and its noise.")
     p.add_argument("--max_episodes_per_map", type=int, default=None)
     p.add_argument("--num_workers", type=int, default=1)
     p.add_argument("--seed", type=int, default=0)
@@ -501,6 +705,8 @@ def get_args(argv=None):
         args.max_episodes_per_map = 3
         args.device = "cpu"
         args.num_workers = 0
+        args.val_freq = 10
+        args.val_batches = 1
         args.savepath = "logs/mapcond/smoke"
     return args
 

@@ -292,6 +292,81 @@ class MapConditionalGaussianDiffusion(GaussianDiffusion):
     """
 
     # -------- training --------
+    def set_collision_penalty(self, weight, scale, shift,
+                              corner_weight=0.0, corner_radius=1.0,
+                              obs_min=None, obs_max=None):
+        """
+        Enable the differentiable wall-collision term (mapcond.collision).
+
+        weight=0 (the default state, i.e. never calling this) leaves p_losses
+        bit-identical to the plain diffusion loss, so every existing checkpoint
+        and training command is unaffected.
+
+        scale/shift: the normalized-xy -> grid_sample-uv affine from
+        local_features.norm_xy_to_uv_affine, i.e. the same coordinate chain the
+        local-feature track already uses.
+
+        Every diffusion timestep is weighted equally, deliberately. An
+        SNR-style schedule (scale by alphas_cumprod[t], "loose early, strict
+        late", mirroring the DFS noise_scaled threshold) was implemented and
+        then removed, because measuring where the violations actually live
+        shows it would delete the objective. Predicted-x0 collision penalty by
+        timestep, trained DiT on its own training data:
+
+            t=5..100   -> 0.00000      t=150 -> 0.00016
+            t=200      -> 0.01258      t=255 -> 0.38727
+
+        All of the signal sits at the TOP of the schedule; below t=100 the
+        prediction from a noised legal demo is already legal, so there is
+        nothing to weight. alphas_cumprod[t] is ~1 there and ~0 at t=255, i.e.
+        exactly inverted relative to the signal.
+
+        Note what this measurement also means: no reweighting can fix the real
+        gap. The model's confident, clean-looking-but-illegal plans appear at
+        LOW t at sampling time, and training never puts it in that state
+        (teacher forcing feeds it noised legal demos). Closing that needs
+        violating states in the data, not a different weighting -- that is what
+        negative_loss() and --negative_weight are for; see MAPCOND_EXP.md
+        section 5.
+
+        corner_weight: weight of the SEPARATE corner-clearance term
+        (mapcond.collision.corner_clearance_penalty). Kept separate from
+        `weight` on purpose -- wall penetration and corner cutting are two
+        different failure modes with two different geometries, and the wall
+        term is blind to corner cuts (slipping through a diagonal pinch grazes
+        both wall boxes with ~0 penetration). 0 disables it. obs_min/obs_max
+        are the shared normalizer's observation bounds, needed because the
+        corner geometry is defined in world units, not normalized ones.
+        """
+        self.collision_weight = float(weight)
+        self.corner_weight = float(corner_weight)
+        self.corner_radius = float(corner_radius)
+        dev = self.betas.device
+        self.collision_uv_scale = torch.as_tensor(scale, dtype=torch.float32, device=dev)
+        self.collision_uv_shift = torch.as_tensor(shift, dtype=torch.float32, device=dev)
+        if obs_min is not None:
+            self.obs_min = torch.as_tensor(obs_min, dtype=torch.float32, device=dev)
+            self.obs_max = torch.as_tensor(obs_max, dtype=torch.float32, device=dev)
+
+    def _cfg_keep_mask(self, batch_size, device):
+        """
+        Per-sample weight for the collision terms: 0 for samples whose map was
+        dropped by classifier-free-guidance dropout in the forward pass just
+        run, 1 otherwise. Returns (weights, normalizer) for a masked mean.
+
+        Backbones advertise the drop mask as `_last_cfg_drop` (see
+        MapConditionalDiT1D.forward for why the penalty must skip those
+        samples). A backbone that does not set it gets the unmasked behaviour,
+        which is what the U-Net arms do today -- they would each need the same
+        one-line record if the penalty is ever run on them.
+        """
+        drop = getattr(self.model, "_last_cfg_drop", None)
+        if drop is None:
+            keep = torch.ones(batch_size, device=device)
+        else:
+            keep = (~drop).float()
+        return keep, keep.sum().clamp_min(1.0)
+
     def p_losses(self, x_start, cond, t, maze=None):
         noise = torch.randn_like(x_start)
         x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
@@ -305,12 +380,99 @@ class MapConditionalGaussianDiffusion(GaussianDiffusion):
             loss, info = self.loss_fn(x_recon, noise)
         else:
             loss, info = self.loss_fn(x_recon, x_start)
+
+        wall_w = getattr(self, "collision_weight", 0.0)
+        corner_w = getattr(self, "corner_weight", 0.0)
+        if (wall_w > 0 or corner_w > 0) and maze is not None:
+            from .collision import (collision_penalty, corner_points,
+                                    corner_clearance_penalty)
+            # predict_epsilon is False in this repo, so x_recon IS the predicted
+            # trajectory and channels action_dim: are its positions.
+            xy = x_recon[..., self.action_dim:]
+            info = dict(info)
+            keep, denom = self._cfg_keep_mask(len(x_start), x_start.device)
+
+            if wall_w > 0:
+                pen = (collision_penalty(xy, maze, self.collision_uv_scale,
+                                         self.collision_uv_shift)
+                       * keep).sum() / denom
+                loss = loss + wall_w * pen
+                info["collision"] = pen.detach()
+
+            if corner_w > 0:
+                # corner geometry lives in world units; unnormalize affinely
+                # (no clipping -- a clamp here would kill the gradient exactly
+                # where the prediction has strayed out of range).
+                xy_world = (xy + 1) * 0.5 * (self.obs_max - self.obs_min) + self.obs_min
+                cpen = (corner_clearance_penalty(
+                    xy_world, corner_points(maze), self.corner_radius)
+                    * keep).sum() / denom
+                loss = loss + corner_w * cpen
+                info["corner"] = cpen.detach()
         return loss, info
 
     def loss(self, x, cond, maze=None):
         batch_size = len(x)
         t = torch.randint(0, self.n_timesteps, (batch_size,), device=x.device).long()
         return self.p_losses(x, cond, t, maze=maze)
+
+    def negative_loss(self, x, cond, maze_blocked, valid=None, t=None):
+        """
+        Penalty-only pass on a map the trajectory is known to violate
+        (mapcond.collision.block_route_cell closes a cell the trajectory runs
+        through).
+
+        No reconstruction term, deliberately: `x` is illegal on `maze_blocked`,
+        so asking the model to reproduce it AND to avoid the wall would be two
+        contradictory objectives and would train it toward something that is
+        neither.
+
+        Why this pass exists: with the map and the demo matched, the predicted
+        x0 is already collision-free below t~100 (measured; see
+        set_collision_penalty), so the ordinary penalty has no signal in the
+        low-noise regime -- which is precisely where sampling produces
+        confident, clean-looking, wall-crossing plans. Here the noised input IS
+        a wall-crossing trajectory at every noise level, so the model gets the
+        missing gradient: "from this state, on this map, predict something that
+        is not in the wall".
+
+        `valid` masks out samples where no safe cell could be closed.
+        """
+        if t is None:
+            t = torch.randint(0, self.n_timesteps, (len(x),),
+                              device=x.device).long()
+        noise = torch.randn_like(x)
+        x_noisy = apply_conditioning(self.q_sample(x_start=x, t=t, noise=noise),
+                                     cond, self.action_dim)
+        x_recon = self.model(x_noisy, cond, t, maze_blocked)
+        x_recon = apply_conditioning(x_recon, cond, self.action_dim)
+
+        from .collision import (collision_penalty, corner_points,
+                                corner_clearance_penalty)
+        xy = x_recon[..., self.action_dim:]
+        if valid is None:
+            valid = torch.ones(len(x), dtype=torch.bool, device=x.device)
+        # CFG dropout applies to this pass too, and it matters more here: the
+        # whole content of a negative is "on THIS map that cell is a wall", so a
+        # sample that was not shown the map carries no usable signal at all.
+        keep, _ = self._cfg_keep_mask(len(x), x.device)
+        w = valid.float() * keep
+        denom = w.sum().clamp_min(1.0)
+
+        loss = x.new_zeros(())
+        info = {}
+        if getattr(self, "collision_weight", 0.0) > 0:
+            pen = (collision_penalty(xy, maze_blocked, self.collision_uv_scale,
+                                     self.collision_uv_shift) * w).sum() / denom
+            loss = loss + self.collision_weight * pen
+            info["neg_collision"] = pen.detach()
+        if getattr(self, "corner_weight", 0.0) > 0:
+            xy_world = (xy + 1) * 0.5 * (self.obs_max - self.obs_min) + self.obs_min
+            cpen = (corner_clearance_penalty(xy_world, corner_points(maze_blocked),
+                                             self.corner_radius) * w).sum() / denom
+            loss = loss + self.corner_weight * cpen
+            info["neg_corner"] = cpen.detach()
+        return loss, info
 
     # -------- sampling --------
     def p_mean_variance(self, x, cond, t, maze=None):

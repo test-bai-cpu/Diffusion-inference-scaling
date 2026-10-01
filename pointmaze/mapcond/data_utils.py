@@ -23,18 +23,21 @@ _PM = os.path.dirname(_HERE)
 _REPO = os.path.dirname(_PM)
 DATA_ROOT = os.path.join(_PM, "ogbench", "data")
 # DEFAULT_VARIANT_DIR = "/home/yufei/research/diffusion/ogbench/data_gen_scripts/newdata_mazev1"
-DEFAULT_VARIANT_DIR = "/home/yufei/research/diffusion/ogbench/data_gen_scripts/newdata_mazev2"
+DEFAULT_VARIANT_DIR = "/projects/bhlg/yzhu37/ogbench/data_gen_scripts/newdata_mazev2"
 # DEFAULT_VARIANT_JSON_DIR = os.path.join(_REPO, "maze_update", "maze_variants")
 DEFAULT_VARIANT_JSON_DIR = os.path.join(_REPO, "maze_update", "maze_variants_v2")
 
 
-def dataset_dir(maze_type):
-    return os.path.join(DATA_ROOT, f"pointmaze-{maze_type}-navigate-v0")
+def dataset_dir(maze_type, validation=False):
+    """OGBench ships a held-out twin of every base map alongside it, 500 train
+    episodes vs 50 validation. `validation=True` selects the `-val` directory."""
+    suffix = "-val" if validation else ""
+    return os.path.join(DATA_ROOT, f"pointmaze-{maze_type}-navigate-v0{suffix}")
 
 
-def load_raw(maze_type):
+def load_raw(maze_type, validation=False):
     """Return (observations, actions, terminals) as float32/bool arrays."""
-    d = dataset_dir(maze_type)
+    d = dataset_dir(maze_type, validation=validation)
     obs = np.load(os.path.join(d, "observations.npy")).astype(np.float32)
     act = np.load(os.path.join(d, "actions.npy")).astype(np.float32)
     term = np.load(os.path.join(d, "terminals.npy"))
@@ -132,7 +135,7 @@ def load_variant_episodes(variant_dir, task, var, validation=False):
     return segment_episodes(*load_variant_raw(variant_dir, task, var, validation))
 
 
-def base_map_specs(maze_types):
+def base_map_specs(maze_types, validation=False):
     """Serializable map specs for the original .npy-backed OGBench maps."""
     raw_grids = MG.all_grids(maze_types)
     specs = []
@@ -141,6 +144,7 @@ def base_map_specs(maze_types):
             "map_id": str(maze_type),
             "kind": "base",
             "maze_type": str(maze_type),
+            "validation": bool(validation),
             "grid": raw_grids[maze_type],
         })
     return specs
@@ -190,7 +194,7 @@ def load_raw_from_spec(spec):
     if "npz_path" in spec and spec["npz_path"] is not None:
         return load_raw_npz(spec["npz_path"])
     if "maze_type" in spec and spec["maze_type"] is not None:
-        return load_raw(spec["maze_type"])
+        return load_raw(spec["maze_type"], validation=spec.get("validation", False))
     raise KeyError("map spec needs raw_loader, npz_path, or maze_type: %r" % spec)
 
 
