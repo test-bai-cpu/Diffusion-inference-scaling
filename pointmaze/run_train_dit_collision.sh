@@ -35,14 +35,17 @@ cd "$(dirname "$0")"
 #             from that checkpoint instead: ~5x cheaper and a cleaner
 #             single-variable attribution, but it inherits whatever basin the
 #             baseline settled into.
-#   corner_w  should be ~20x wall_w -- the two penalties have natural scales
-#             four orders of magnitude apart; see MAPCOND_EXP.md section 1.
+#   corner_w  ~3-4x wall_w. The two terms have very different natural scales,
+#             and the ratio MOVES as the model converges, so this is calibrated
+#             on the converged regime where training spends its time. See
+#             MAPCOND_EXP.md section 1 -- an earlier 20x figure was derived on
+#             the wrong population and would over-weight corners ~6x.
 #   neg_w     > 0 turns on the map-perturbation negatives (section 5), the part
 #             that supplies gradient at low noise. Costs ~2x per step, so
 #             expect roughly 15 it/s rather than 30 on an A100.
 mode="${1:-scratch}"
 wall_w="${2:-1.0}"
-corner_w="${3:-20.0}"
+corner_w="${3:-3.0}"
 neg_w="${4:-1.0}"
 
 case "$mode" in
