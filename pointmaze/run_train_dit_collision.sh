@@ -18,10 +18,13 @@ cd "$(dirname "$0")"
 #
 # Success criterion is NOT training loss -- the added term makes the totals
 # incomparable to the baseline run. Judge it with:
-#   python plan_quality.py --ckpt logs/mapcond-mazev1-seed2-dit/variants_train_giant/state_1000000.pt \
-#                                 logs/mapcond-dit-collision/variants_train_giant/state_200000.pt
-# and look at clean% and `best`, then re-run cond_sensitivity.py to see whether
-# the closed-cell response improved.
+#   python plan_quality.py --guidance 0 1 2 \
+#     --ckpt logs/mapcond-mazev1-seed2-dit/variants_train_giant/state_1000000.pt \
+#            logs/mapcond-dit-collision-scratch-w1.0-c20.0-n1.0/variants_train_giant/state_1000000.pt
+# and look at clean% and `best` at EVERY guidance value -- the previous run was
+# far better than baseline at w=0 and 23x worse at w=2 (MAPCOND_EXP.md section
+# 8). Watch the `cfgdiv` column during training: baseline 12.5%, the run that
+# broke CFG 56%.
 #
 # Caveat to keep in mind when reading the result: the penalty is evaluated on
 # x0 predicted from NOISED TRAINING trajectories, which are anchored to legal
@@ -35,17 +38,17 @@ cd "$(dirname "$0")"
 #             from that checkpoint instead: ~5x cheaper and a cleaner
 #             single-variable attribution, but it inherits whatever basin the
 #             baseline settled into.
-#   corner_w  ~3-4x wall_w. The two terms have very different natural scales,
-#             and the ratio MOVES as the model converges, so this is calibrated
-#             on the converged regime where training spends its time. See
-#             MAPCOND_EXP.md section 1 -- an earlier 20x figure was derived on
-#             the wrong population and would over-weight corners ~6x.
+#   corner_w  20x wall_w. At 3x the first run eliminated wall penetration
+#             (69 -> 0.24) but corner cutting got 4x worse (13 -> 53): with
+#             walls blocked, slipping through diagonal pinches is the escape
+#             route, so this term has to be stronger than ratio-matching
+#             suggests. MAPCOND_EXP.md section 1.
 #   neg_w     > 0 turns on the map-perturbation negatives (section 5), the part
-#             that supplies gradient at low noise. Costs ~2x per step, so
-#             expect roughly 15 it/s rather than 30 on an A100.
+#             that supplies gradient at low noise. Costs ~3x per step: the
+#             previous run measured 10.6 it/s on an A100, ~26h for 1M steps.
 mode="${1:-scratch}"
 wall_w="${2:-1.0}"
-corner_w="${3:-3.0}"
+corner_w="${3:-20.0}"
 neg_w="${4:-1.0}"
 
 case "$mode" in

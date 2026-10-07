@@ -126,16 +126,6 @@ class MapConditionalDiT1D(DiT1D):
                fall back to a grid bound via bind_maze() (if any); otherwise
                the model is map-blind (pure-timestep adaLN, no map term).
         """
-        # Which samples had their map dropped this forward pass. Read back by
-        # MapConditionalGaussianDiffusion.p_losses so the collision penalty can
-        # skip them: a dropped sample was deliberately not shown the map, so
-        # penalizing it for that map's walls would train the null pathway to
-        # avoid walls generically. That is incoherent (there is no single map to
-        # be safe on) and it is actively harmful -- CFG's guidance direction is
-        # out_cond - out_null, so wall avoidance present in BOTH terms cancels,
-        # weakening exactly the signal guidance is supposed to amplify.
-        self._last_cfg_drop = None
-
         if maze is None and self._bound_maze is not None:
             maze = self._bound_maze.expand(x.shape[0], *self._bound_maze.shape[1:])
 
@@ -148,7 +138,6 @@ class MapConditionalDiT1D(DiT1D):
         if self.training and self.cfg_dropout > 0:
             drop = torch.rand(emb.shape[0], device=emb.device) < self.cfg_dropout
             emb = torch.where(drop[:, None], self.null_map_emb.unsqueeze(0), emb)
-            self._last_cfg_drop = drop
 
         c = c_time + self.map_mlp(emb)
         out = self._run_trunk(x, c)

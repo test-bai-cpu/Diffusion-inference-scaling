@@ -24,3 +24,8 @@ for task in 1 2 3 4 5; do
     done
   done
 done
+
+#### the ADFS one ####
+# python run.py --dataset pointmaze-giant-newvar-navigate-v0 --method adfs \
+#   --use_distance_field --dist_omega 0.5 --use_map_cond --map_cond_ckpt <ckpt> \
+#   --adfs "route_depth=full,local_max_depth=4,nfe_budget=320,verbose=true"

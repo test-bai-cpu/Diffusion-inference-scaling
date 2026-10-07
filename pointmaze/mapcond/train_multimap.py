@@ -43,6 +43,7 @@ if _POINTMAZE not in sys.path:
 
 from mapcond.dataset import MultiMazeGoalDataset, map_batch_collate
 from mapcond import data_utils as DU
+from diffuser.models.helpers import apply_conditioning
 from mapcond.models import (
     MapConditionalTemporalUnet, MapConditionalGaussianDiffusion,
 )
@@ -223,9 +224,46 @@ def build_val_loader(args, dataset):
 
 
 @torch.no_grad()
+def cfg_divergence(diffusion, x0, cond, maze):
+    """
+    ||out_cond - out_null|| / ||out_cond|| on noised held-out trajectories.
+
+    This is the quantity that predicts whether classifier-free guidance will
+    behave. CFG extrapolates along (out_cond - out_null); that is only
+    meaningful while the difference is a small correction. Measured: 6.4% on
+    the baseline DiT, 72.4% on the run whose collision penalty skipped
+    CFG-dropped samples -- and that run went from far-better-than-baseline at
+    w=0 to 23x worse at w=2. Logging it makes that failure visible during
+    training instead of after a full rollout evaluation.
+
+    Backbone-agnostic: every mapcond backbone computes, in eval mode,
+    out = (1 + w) * out_cond - w * out_null. So out(w=0) = out_cond and
+    out(w=1) - out(w=0) = out_cond - out_null, without reaching into any
+    model's internals. Must be called under eval().
+    """
+    m = diffusion.model
+    if maze is None or not hasattr(m, "guidance_scale"):
+        return None
+    t = torch.randint(0, diffusion.n_timesteps, (len(x0),), device=x0.device).long()
+    x = apply_conditioning(
+        diffusion.q_sample(x_start=x0, t=t, noise=torch.randn_like(x0)),
+        cond, diffusion.action_dim)
+    old = m.guidance_scale
+    try:
+        m.guidance_scale = 0.0
+        out_c = apply_conditioning(m(x, cond, t, maze), cond, diffusion.action_dim)
+        m.guidance_scale = 1.0
+        out_1 = apply_conditioning(m(x, cond, t, maze), cond, diffusion.action_dim)
+    finally:
+        m.guidance_scale = old
+    return float((out_1 - out_c).norm() / out_c.norm().clamp_min(1e-8))
+
+
+@torch.no_grad()
 def validate(diffusion, loader, args):
     """
-    Mean loss on the held-out set. Returns (plain diffusion loss, penalties).
+    Mean loss on the held-out set. Returns (plain diffusion loss, penalties,
+    CFG branch divergence -- see cfg_divergence).
 
     The plain diffusion term is reported separately because it is the only
     number comparable ACROSS runs: the penalty weights differ between arms, so
@@ -242,7 +280,7 @@ def validate(diffusion, loader, args):
     was_training = diffusion.training
     diffusion.eval()
 
-    tot, pen_tot, n = 0.0, 0.0, 0
+    tot, pen_tot, div_tot, n_div, n = 0.0, 0.0, 0.0, 0, 0
     for batch in loader:
         trajs = batch.trajectories.to(args.device)
         cond = {k: v.to(args.device) for k, v in batch.conditions.items()}
@@ -253,13 +291,18 @@ def validate(diffusion, loader, args):
         tot += float(loss)
         pen_tot += pen
         n += 1
+        div = cfg_divergence(diffusion, trajs, cond, maze)
+        if div is not None:
+            div_tot += div
+            n_div += 1
 
     if was_training:
         diffusion.train()
     torch.set_rng_state(rng_state)
     if cuda_state is not None:
         torch.cuda.set_rng_state_all(cuda_state)
-    return (tot - pen_tot) / max(n, 1), pen_tot / max(n, 1)
+    return ((tot - pen_tot) / max(n, 1), pen_tot / max(n, 1),
+            div_tot / n_div if n_div else None)
 
 
 def save_ckpt(path, step, model, ema_model, dataset, args):
@@ -419,9 +462,9 @@ def train(args):
             else:
                 ema.update(ema_model, diffusion)
 
-        val_loss = val_pen = None
+        val_loss = val_pen = val_div = None
         if val_loader is not None and step % args.val_freq == 0:
-            val_loss, val_pen = validate(diffusion, val_loader, args)
+            val_loss, val_pen, val_div = validate(diffusion, val_loader, args)
 
         if step % args.log_freq == 0 or val_loss is not None:
             loss_log.append((step, float(loss)))
@@ -438,6 +481,7 @@ def train(args):
             coll_str += f" | corn {corn:8.5f}" if corn is not None else ""
             coll_str += f" | neg {neg:8.5f}" if neg is not None else ""
             coll_str += f" | VAL {val_loss:8.5f}" if val_loss is not None else ""
+            coll_str += f" | cfgdiv {val_div:6.1%}" if val_div is not None else ""
             print(f"{step:>7d} | loss {float(loss):8.5f} | {rate:6.1f} it/s"
                   f"{film_str}{coll_str}", flush=True)
             # crash-safe incremental log, watchable while training runs
@@ -446,14 +490,15 @@ def train(args):
             with open(_csv, "a") as f:
                 if _new:
                     f.write("step,loss,it_per_s,film_norm,collision,corner,"
-                            "neg_collision,val_loss,val_penalty\n")
+                            "neg_collision,val_loss,val_penalty,val_cfg_div\n")
                 f.write(f"{step},{float(loss):.6f},{rate:.3f},"
                         f"{'' if film_norm is None else f'{film_norm:.6f}'},"
                         f"{'' if coll is None else f'{coll:.6f}'},"
                         f"{'' if corn is None else f'{corn:.6f}'},"
                         f"{'' if neg is None else f'{neg:.6f}'},"
                         f"{'' if val_loss is None else f'{val_loss:.6f}'},"
-                        f"{'' if val_pen is None else f'{val_pen:.6f}'}\n")
+                        f"{'' if val_pen is None else f'{val_pen:.6f}'},"
+                        f"{'' if val_div is None else f'{val_div:.6f}'}\n")
             if tb is not None:
                 tb.add_scalar("train/loss", float(loss), step)
                 tb.add_scalar("train/it_per_s", rate, step)
@@ -468,6 +513,8 @@ def train(args):
                 if val_loss is not None:
                     tb.add_scalar("val/loss", val_loss, step)
                     tb.add_scalar("val/penalty", val_pen, step)
+                if val_div is not None:
+                    tb.add_scalar("val/cfg_divergence", val_div, step)
 
         if step > 0 and step % args.save_freq == 0:
             save_ckpt(os.path.join(args.savepath, f"state_{step}.pt"),

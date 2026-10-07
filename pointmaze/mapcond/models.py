@@ -348,26 +348,31 @@ class MapConditionalGaussianDiffusion(GaussianDiffusion):
             self.obs_min = torch.as_tensor(obs_min, dtype=torch.float32, device=dev)
             self.obs_max = torch.as_tensor(obs_max, dtype=torch.float32, device=dev)
 
-    def _cfg_keep_mask(self, batch_size, device):
-        """
-        Per-sample weight for the collision terms: 0 for samples whose map was
-        dropped by classifier-free-guidance dropout in the forward pass just
-        run, 1 otherwise. Returns (weights, normalizer) for a masked mean.
-
-        Backbones advertise the drop mask as `_last_cfg_drop` (see
-        MapConditionalDiT1D.forward for why the penalty must skip those
-        samples). A backbone that does not set it gets the unmasked behaviour,
-        which is what the U-Net arms do today -- they would each need the same
-        one-line record if the penalty is ever run on them.
-        """
-        drop = getattr(self.model, "_last_cfg_drop", None)
-        if drop is None:
-            keep = torch.ones(batch_size, device=device)
-        else:
-            keep = (~drop).float()
-        return keep, keep.sum().clamp_min(1.0)
-
     def p_losses(self, x_start, cond, t, maze=None):
+        """
+        The collision terms below are applied to EVERY sample, including those
+        whose map was replaced by the null embedding through CFG dropout.
+
+        An earlier version masked those samples out, on the argument that a
+        model not shown the map should not be penalized for its walls. Measured
+        at 400k steps, that made the two CFG branches diverge: the conditional
+        branch learned "never enter walls", the null branch learned nothing
+        about walls, and ||out_cond - out_null|| / ||out_cond|| went from 6.4%
+        (baseline) to 72.4%. CFG extrapolates along that difference, so at the
+        deployed w=2 total verifier cost went from 44.9 to 1035.4 -- while the
+        same checkpoint at w=0 was far better than baseline (wall cost 69.1 ->
+        0.24). An auxiliary loss trained into only one branch is effectively
+        multiplied by (1 + w) at sampling time.
+
+        The masking argument was also weaker than it looked: the null branch is
+        not "ignore the task", it is "do the task without the explicit
+        condition". The noised trajectory itself carries information about
+        which map it came from, so "avoid the walls, inferring the map from the
+        trajectory" is a coherent, learnable target. Training both branches on
+        the same objective is the standard CFG setup; it leaves (cond - null)
+        carrying only what explicitly knowing the map adds. See
+        MAPCOND_EXP.md section 8.
+        """
         noise = torch.randn_like(x_start)
         x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
         x_noisy = apply_conditioning(x_noisy, cond, self.action_dim)
@@ -390,12 +395,10 @@ class MapConditionalGaussianDiffusion(GaussianDiffusion):
             # trajectory and channels action_dim: are its positions.
             xy = x_recon[..., self.action_dim:]
             info = dict(info)
-            keep, denom = self._cfg_keep_mask(len(x_start), x_start.device)
 
             if wall_w > 0:
-                pen = (collision_penalty(xy, maze, self.collision_uv_scale,
-                                         self.collision_uv_shift)
-                       * keep).sum() / denom
+                pen = collision_penalty(xy, maze, self.collision_uv_scale,
+                                        self.collision_uv_shift).mean()
                 loss = loss + wall_w * pen
                 info["collision"] = pen.detach()
 
@@ -404,9 +407,8 @@ class MapConditionalGaussianDiffusion(GaussianDiffusion):
                 # (no clipping -- a clamp here would kill the gradient exactly
                 # where the prediction has strayed out of range).
                 xy_world = (xy + 1) * 0.5 * (self.obs_max - self.obs_min) + self.obs_min
-                cpen = (corner_clearance_penalty(
-                    xy_world, corner_points(maze), self.corner_radius)
-                    * keep).sum() / denom
+                cpen = corner_clearance_penalty(
+                    xy_world, corner_points(maze), self.corner_radius).mean()
                 loss = loss + corner_w * cpen
                 info["corner"] = cpen.detach()
         return loss, info
@@ -452,11 +454,10 @@ class MapConditionalGaussianDiffusion(GaussianDiffusion):
         xy = x_recon[..., self.action_dim:]
         if valid is None:
             valid = torch.ones(len(x), dtype=torch.bool, device=x.device)
-        # CFG dropout applies to this pass too, and it matters more here: the
-        # whole content of a negative is "on THIS map that cell is a wall", so a
-        # sample that was not shown the map carries no usable signal at all.
-        keep, _ = self._cfg_keep_mask(len(x), x.device)
-        w = valid.float() * keep
+        # Applied to CFG-dropped samples too, for the same reason as in
+        # p_losses: masking them out lets the conditional and null branches
+        # diverge, and CFG then multiplies the divergence by (1 + w).
+        w = valid.float()
         denom = w.sum().clamp_min(1.0)
 
         loss = x.new_zeros(())
