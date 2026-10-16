@@ -228,13 +228,13 @@ def cfg_divergence(diffusion, x0, cond, maze):
     """
     ||out_cond - out_null|| / ||out_cond|| on noised held-out trajectories.
 
-    This is the quantity that predicts whether classifier-free guidance will
-    behave. CFG extrapolates along (out_cond - out_null); that is only
-    meaningful while the difference is a small correction. Measured: 6.4% on
-    the baseline DiT, 72.4% on the run whose collision penalty skipped
-    CFG-dropped samples -- and that run went from far-better-than-baseline at
-    w=0 to 23x worse at w=2. Logging it makes that failure visible during
-    training instead of after a full rollout evaluation.
+    A measure of how much the output depends on the map -- NOT a predictor of
+    whether CFG will work. Measured on held-out data: baseline DiT 12.5% (it
+    barely reads the map), the run whose penalty skipped CFG-dropped samples
+    56.0% (CFG broke at w=2), the symmetric-penalty run 70.4% (CFG works best
+    at w=2). What breaks CFG is what the difference contains -- a component
+    from the two branches learning different tasks -- not how large it is.
+    The only reliable CFG check is plan_quality.py at several guidance scales.
 
     Backbone-agnostic: every mapcond backbone computes, in eval mode,
     out = (1 + w) * out_cond - w * out_null. So out(w=0) = out_cond and

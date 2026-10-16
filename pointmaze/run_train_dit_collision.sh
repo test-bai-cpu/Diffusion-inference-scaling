@@ -23,8 +23,8 @@ cd "$(dirname "$0")"
 #            logs/mapcond-dit-collision-scratch-w1.0-c20.0-n1.0/variants_train_giant/state_1000000.pt
 # and look at clean% and `best` at EVERY guidance value -- the previous run was
 # far better than baseline at w=0 and 23x worse at w=2 (MAPCOND_EXP.md section
-# 8). Watch the `cfgdiv` column during training: baseline 12.5%, the run that
-# broke CFG 56%.
+# 8). The `cfgdiv` column measures map-dependence, NOT CFG health: this run
+# sits at ~70% and CFG works best at w=2, while the masked run broke at 56%.
 #
 # Caveat to keep in mind when reading the result: the penalty is evaluated on
 # x0 predicted from NOISED TRAINING trajectories, which are anchored to legal
