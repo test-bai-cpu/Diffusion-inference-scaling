@@ -77,8 +77,11 @@ def build(args, dataset):
             "so far (adaLN-Zero IS global FiLM, built into MapConditionalDiT1D " \
             "-- see mapcond/dit_models.py); --global_film/--local_channels/" \
             "--local_film are U-Net-only for now"
-        from mapcond.dit_models import MapConditionalDiT1D
-        model = MapConditionalDiT1D(
+        if args.dit_joint:
+            from mapcond.dit_joint_models import JointMapDiT1D as dit_cls
+        else:
+            from mapcond.dit_models import MapConditionalDiT1D as dit_cls
+        model = dit_cls(
             horizon=args.horizon,
             transition_dim=dataset.transition_dim,
             cond_dim=dataset.observation_dim,
@@ -89,7 +92,20 @@ def build(args, dataset):
             mlp_ratio=args.dit_mlp_ratio,
             pool_size=args.pool_size,
             cfg_dropout=args.cfg_dropout,
-        ).to(args.device)
+        )
+        if args.dit_joint:
+            assert not args.map_blind, \
+                "--dit_joint is a map-token model; --map_blind would leave it " \
+                "with nothing but the null map"
+            from mapcond import local_features as LF
+            lo, hi = dataset.normalizer.bounds["observations"]
+            scale, shift = LF.norm_xy_to_uv_affine(lo[:2], hi[:2],
+                                                   dataset.canvas_hw)
+            model.set_coord_map(scale, shift, dataset.canvas_hw)
+            print(f"[train_multimap] dit_joint coord_map scale={scale.tolist()} "
+                  f"shift={shift.tolist()} canvas={tuple(dataset.canvas_hw)}",
+                  flush=True)
+        model = model.to(args.device)
     elif args.global_film:
         assert args.local_channels == 0, \
             "--global_film is a global-only tier for now; incompatible " \
@@ -339,6 +355,7 @@ def save_ckpt(path, step, model, ema_model, dataset, args):
             "dit_depth": args.dit_depth,
             "dit_patch_size": args.dit_patch_size,
             "dit_mlp_ratio": args.dit_mlp_ratio,
+            "dit_joint": bool(args.dit_joint),
             "collision_weight": args.collision_weight,
             "corner_weight": args.corner_weight,
             "negative_weight": args.negative_weight,
@@ -571,6 +588,9 @@ def _film_norm(diffusion):
         from mapcond.dit1d import DiTBlock1d, FinalLayer1d
         wrap_classes.append((DiTBlock1d, lambda m: m.adaLN_modulation[-1]))
         wrap_classes.append((FinalLayer1d, lambda m: m.adaLN_modulation[-1]))
+        from mapcond.dit_joint_models import JointBlock1d
+        wrap_classes.append((JointBlock1d, lambda m: m.t_ada[-1]))
+        wrap_classes.append((JointBlock1d, lambda m: m.m_ada[-1]))
     except Exception:
         pass
     if not wrap_classes:
@@ -673,6 +693,11 @@ def get_args(argv=None):
     p.add_argument("--dit_mlp_ratio", type=float, default=4.0,
                    help="DiT block MLP hidden width, as a multiple of "
                         "dit_hidden.")
+    p.add_argument("--dit_joint", action="store_true",
+                   help="With --backbone dit: replace the pooled map vector with "
+                        "one token per canvas cell and run JOINT attention over "
+                        "trajectory + map tokens (MM-DiT style, "
+                        "mapcond.dit_joint_models). Train from scratch.")
     p.add_argument("--init_from", type=str, default="",
                    help="Warm start from a train_multimap checkpoint (weights "
                         "only; fresh optimizer, EMA and step counter). Model "

@@ -84,8 +84,11 @@ def load_mapcond_diffusion(ckpt_path, device="cpu", use_ema=True, horizon=None,
 
     local_k = int(cfg.get("local_channels", 0))
     if cfg.get("backbone", "unet") == "dit":
-        from mapcond.dit_models import MapConditionalDiT1D
-        model = MapConditionalDiT1D(
+        if cfg.get("dit_joint", False):
+            from mapcond.dit_joint_models import JointMapDiT1D as dit_cls
+        else:
+            from mapcond.dit_models import MapConditionalDiT1D as dit_cls
+        model = dit_cls(
             horizon=cfg["horizon"],
             transition_dim=cfg["transition_dim"],
             cond_dim=cfg["observation_dim"],
