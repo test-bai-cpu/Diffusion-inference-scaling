@@ -19,8 +19,10 @@ from . import data_utils as DU
 from . import maze_grids as MG
 from .global_normalizer import GlobalNormalizer, fit_global_normalizer
 
-# Batch carries the maze grid as a third field (GoalDataset's Batch has two).
-MapBatch = namedtuple("MapBatch", "trajectories conditions maze")
+# Batch carries the maze grid as a third field (GoalDataset's Batch has two),
+# and the index of that map in dataset.map_ids as a fourth (optional) one.
+MapBatch = namedtuple("MapBatch", "trajectories conditions maze map_idx",
+                      defaults=(None,))
 
 
 class MultiMazeGoalDataset(torch.utils.data.Dataset):
@@ -46,6 +48,7 @@ class MultiMazeGoalDataset(torch.utils.data.Dataset):
 
         self.map_specs = [self._coerce_map_spec(s) for s in map_specs]
         self.map_ids = [s["map_id"] for s in self.map_specs]
+        self._map_index = {mid: k for k, mid in enumerate(self.map_ids)}
         if self.maze_types is None:
             self.maze_types = list(self.map_ids)
         self.horizon = horizon
@@ -179,7 +182,38 @@ class MultiMazeGoalDataset(torch.utils.data.Dataset):
         maze = self.grids[map_id]  # [Hc, Wc] float32
         if self.local_dist:
             maze = self._local_stack(map_id, obs[-1])
-        return MapBatch(trajectories, conditions, maze)
+        return MapBatch(trajectories, conditions, maze, self._map_index[map_id])
+
+    def sibling_map_table(self):
+        """
+        For self-conditioning with other-map drafts: (grids [n_maps, Hc, Wc]
+        float32, partners [n_maps, P] long, n_partners [n_maps] long). The
+        partners of a variant map are the other maps of the same task family
+        (its sibling variants plus any base map); a base map, shared by every
+        task, gets all other maps. Variant map_ids carry the task as
+        "..._task<k>_..." (see data_utils.giant_variant_map_specs).
+        """
+        import re
+        task = [re.search(r"_task(\d+)", mid) for mid in self.map_ids]
+        task = [None if t is None else int(t.group(1)) for t in task]
+        n = len(self.map_ids)
+        lists = []
+        for k in range(n):
+            if task[k] is None:
+                lists.append([j for j in range(n) if j != k])
+            else:
+                lists.append([j for j in range(n) if j != k
+                              and (task[j] == task[k] or task[j] is None)])
+        P = max(1, max(len(l) for l in lists))
+        partners = np.zeros((n, P), np.int64)
+        counts = np.zeros(n, np.int64)
+        for k, l in enumerate(lists):
+            counts[k] = len(l)
+            if l:
+                partners[k, :len(l)] = l
+        grids = np.stack([self.grids[mid] for mid in self.map_ids]).astype(np.float32)
+        return (torch.as_tensor(grids), torch.as_tensor(partners),
+                torch.as_tensor(counts))
 
     def _local_stack(self, map_id, goal_obs_norm):
         """[2, Hc, Wc]: occupancy + BFS distance to this window's goal cell."""
@@ -208,4 +242,7 @@ def map_batch_collate(samples):
         t: torch.as_tensor(np.stack([s.conditions[t] for s in samples]))
         for t in cond_keys
     }
-    return MapBatch(trajs, conditions, mazes)
+    map_idx = None
+    if samples[0].map_idx is not None:
+        map_idx = torch.as_tensor([s.map_idx for s in samples], dtype=torch.long)
+    return MapBatch(trajs, conditions, mazes, map_idx)

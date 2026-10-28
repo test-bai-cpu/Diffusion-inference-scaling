@@ -84,11 +84,13 @@ def load_mapcond_diffusion(ckpt_path, device="cpu", use_ema=True, horizon=None,
 
     local_k = int(cfg.get("local_channels", 0))
     if cfg.get("backbone", "unet") == "dit":
+        sc_extra = {"self_cond": True} if cfg.get("self_cond", False) else {}
         if cfg.get("dit_joint", False):
             from mapcond.dit_joint_models import JointMapDiT1D as dit_cls
         else:
             from mapcond.dit_models import MapConditionalDiT1D as dit_cls
         model = dit_cls(
+            **sc_extra,
             horizon=cfg["horizon"],
             transition_dim=cfg["transition_dim"],
             cond_dim=cfg["observation_dim"],
@@ -150,6 +152,10 @@ def load_mapcond_diffusion(ckpt_path, device="cpu", use_ema=True, horizon=None,
                   "guidance_scale = 0.")
             guidance_scale = 0.0
     diffusion.model.guidance_scale = float(guidance_scale)
+    if getattr(diffusion.model, "self_cond", False):
+        # every sampling loop (repo p_sample_loop, search pipelines, probes)
+        # then feeds the model its own previous x0 as the draft
+        diffusion.model.sc_cache_enabled = True
     diffusion.model.map_blind = bool(cfg.get("map_blind", False))
     if diffusion.model.map_blind:
         if guidance_scale > 0:

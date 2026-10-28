@@ -348,7 +348,60 @@ class MapConditionalGaussianDiffusion(GaussianDiffusion):
             self.obs_min = torch.as_tensor(obs_min, dtype=torch.float32, device=dev)
             self.obs_max = torch.as_tensor(obs_max, dtype=torch.float32, device=dev)
 
-    def p_losses(self, x_start, cond, t, maze=None):
+    def set_self_cond(self, none_frac=0.5, alt_frac=0.25, max_lag=16):
+        """
+        Self-conditioning schedule for models with model.self_cond (see
+        mapcond.dit_joint_models). Per sample, the draft fed to the second pass:
+          none_frac            : no draft (all zeros)
+          alt_frac             : x0 estimate made on ANOTHER map of the same task
+                                 family (needs alt_maze in p_losses)
+          the rest             : x0 estimate made on the sample's own map
+        The other-map drafts are the point: on its own (memorized) training map
+        the first-pass estimate is almost always legal, so the reconstruction
+        loss would rarely show "draft crosses a wall here -> target goes
+        around"; an estimate made on a sibling map follows that map's routes and
+        crosses this map's walls, with the true demo as the target.
+        max_lag: the draft is estimated at t + U{0..max_lag} (same noise), since
+        at sampling time it comes from the previous, noisier step (~16
+        timesteps earlier with the 16-step DFS sampler).
+        """
+        assert 0 <= none_frac and 0 <= alt_frac and none_frac + alt_frac <= 1
+        self.sc_none_frac = float(none_frac)
+        self.sc_alt_frac = float(alt_frac)
+        self.sc_max_lag = int(max_lag)
+
+    def _self_cond_recon(self, x_start, x_noisy, noise, cond, t, maze, alt_maze):
+        """Two-pass self-conditioned prediction for p_losses (first pass under
+        no_grad). One CFG-dropout mask for both passes: if they drew their own,
+        a sample whose map is dropped in the graded pass could receive a draft
+        drawn WITH the map, leaking map information into the null branch."""
+        m = self.model
+        B, dev = len(x_start), x_start.device
+        none_frac = getattr(self, "sc_none_frac", 0.5)
+        alt_frac = getattr(self, "sc_alt_frac", 0.0) if alt_maze is not None else 0.0
+        max_lag = getattr(self, "sc_max_lag", 0)
+
+        drop = None
+        if m.training and m.cfg_dropout > 0 and maze is not None:
+            drop = torch.rand(B, device=dev) < m.cfg_dropout
+        u = torch.rand(B, device=dev)
+        has = u >= none_frac
+        use_alt = u >= 1.0 - alt_frac
+
+        with torch.no_grad():
+            lag = torch.randint(0, max_lag + 1, (B,), device=dev)
+            t_d = (t + lag).clamp(max=self.n_timesteps - 1)
+            x_d = apply_conditioning(self.q_sample(x_start=x_start, t=t_d, noise=noise),
+                                     cond, self.action_dim)
+            maze_d = maze
+            if alt_frac > 0 and maze is not None:
+                maze_d = torch.where(use_alt[:, None, None], alt_maze, maze)
+            est = m(x_d, cond, t_d, maze_d, x_sc=torch.zeros_like(x_d), drop=drop)
+            est = apply_conditioning(est.clamp(-1., 1.), cond, self.action_dim)
+            x_sc = est * has[:, None, None].float()
+        return m(x_noisy, cond, t, maze, x_sc=x_sc, drop=drop)
+
+    def p_losses(self, x_start, cond, t, maze=None, alt_maze=None):
         """
         The collision terms below are applied to EVERY sample, including those
         whose map was replaced by the null embedding through CFG dropout.
@@ -377,7 +430,11 @@ class MapConditionalGaussianDiffusion(GaussianDiffusion):
         x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
         x_noisy = apply_conditioning(x_noisy, cond, self.action_dim)
 
-        x_recon = self.model(x_noisy, cond, t, maze)
+        if getattr(self.model, "self_cond", False):
+            x_recon = self._self_cond_recon(x_start, x_noisy, noise, cond, t,
+                                            maze, alt_maze)
+        else:
+            x_recon = self.model(x_noisy, cond, t, maze)
         x_recon = apply_conditioning(x_recon, cond, self.action_dim)
 
         assert noise.shape == x_recon.shape
@@ -413,10 +470,10 @@ class MapConditionalGaussianDiffusion(GaussianDiffusion):
                 info["corner"] = cpen.detach()
         return loss, info
 
-    def loss(self, x, cond, maze=None):
+    def loss(self, x, cond, maze=None, alt_maze=None):
         batch_size = len(x)
         t = torch.randint(0, self.n_timesteps, (batch_size,), device=x.device).long()
-        return self.p_losses(x, cond, t, maze=maze)
+        return self.p_losses(x, cond, t, maze=maze, alt_maze=alt_maze)
 
     def negative_loss(self, x, cond, maze_blocked, valid=None, t=None):
         """

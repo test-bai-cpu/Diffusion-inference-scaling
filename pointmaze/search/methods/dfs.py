@@ -9,6 +9,13 @@ from search.utils import rescale_grad
 import math
 
 
+def _reset_self_cond(unet):
+    """Clear a self-conditioned model's cached draft (no-op for other models)."""
+    reset = getattr(unet, "reset_self_cond", None)
+    if reset is not None:
+        reset()
+
+
 class DFSGuidance(BaseGuidance):
     def __init__(self, args:Arguments, **kwargs):
         super().__init__(args, **kwargs)
@@ -246,6 +253,9 @@ class DFSGuidance(BaseGuidance):
                 accept = True
                 forced_best = True
                 x_prev = self.buffer[i][max(self.buffer[i].keys())]
+                # the cached self-conditioning draft belongs to the attempt just
+                # rejected, not to the buffered x_prev taken instead
+                _reset_self_cond(unet)
             else:
                 accept = True
             self._print_monitor(i, ts[i], cost.detach().cpu().item(),
@@ -257,6 +267,9 @@ class DFSGuidance(BaseGuidance):
             return x_prev, {"i_next": i + 1}
 
         else:
+            # back off with no draft: keeping the rejected plan as the
+            # self-conditioning draft would steer the retry into the same corridor
+            _reset_self_cond(unet)
             cond = kwargs['cond']
             next_noise_level = max(0, i - self.args.recur_depth)
             local_radius = int(getattr(self.args, "dfs_local_renoise", 0) or 0)

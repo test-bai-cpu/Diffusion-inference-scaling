@@ -77,11 +77,15 @@ def build(args, dataset):
             "so far (adaLN-Zero IS global FiLM, built into MapConditionalDiT1D " \
             "-- see mapcond/dit_models.py); --global_film/--local_channels/" \
             "--local_film are U-Net-only for now"
+        assert not args.self_cond or args.dit_joint, \
+            "--self_cond is implemented for --dit_joint only"
+        extra = {"self_cond": True} if args.self_cond else {}
         if args.dit_joint:
             from mapcond.dit_joint_models import JointMapDiT1D as dit_cls
         else:
             from mapcond.dit_models import MapConditionalDiT1D as dit_cls
         model = dit_cls(
+            **extra,
             horizon=args.horizon,
             transition_dim=dataset.transition_dim,
             cond_dim=dataset.observation_dim,
@@ -169,6 +173,12 @@ def build(args, dataset):
         clip_denoised=True,
         predict_epsilon=False,
     ).to(args.device)
+    if args.self_cond:
+        diffusion.set_self_cond(none_frac=0.5, alt_frac=args.sc_alt_frac,
+                                max_lag=args.sc_max_lag)
+        print(f"[train_multimap] self_cond: none 0.5 | own-map "
+              f"{0.5 - args.sc_alt_frac:.2f} | other-map {args.sc_alt_frac:.2f} "
+              f"| draft lag U{{0..{args.sc_max_lag}}}", flush=True)
     if args.collision_weight > 0 or args.corner_weight > 0:
         assert not args.map_blind, \
             "--collision_weight/--corner_weight need the maze (map_blind passes maze=None)"
@@ -356,6 +366,9 @@ def save_ckpt(path, step, model, ema_model, dataset, args):
             "dit_patch_size": args.dit_patch_size,
             "dit_mlp_ratio": args.dit_mlp_ratio,
             "dit_joint": bool(args.dit_joint),
+            "self_cond": bool(args.self_cond),
+            "sc_alt_frac": args.sc_alt_frac,
+            "sc_max_lag": args.sc_max_lag,
             "collision_weight": args.collision_weight,
             "corner_weight": args.corner_weight,
             "negative_weight": args.negative_weight,
@@ -447,6 +460,14 @@ def train(args):
         except Exception as e:
             print(f"[train_multimap] tensorboard disabled "
                   f"({type(e).__name__}: {e})", flush=True)      # (step, loss)
+    # sibling maps for self-conditioning drafts made on another map
+    sib = None
+    if args.self_cond and args.sc_alt_frac > 0:
+        grids, partners, counts = dataset.sibling_map_table()
+        assert int(counts.min()) > 0, "every map needs at least one sibling map"
+        sib = (grids.to(args.device), partners.to(args.device), counts.to(args.device))
+        print(f"[train_multimap] self_cond sibling maps: {len(counts)} maps, "
+              f"{int(counts.min())}-{int(counts.max())} siblings each", flush=True)
     t0 = time.time()
     for step in range(args.n_train_steps):
         opt.zero_grad()
@@ -455,7 +476,12 @@ def train(args):
             trajs = batch.trajectories.to(args.device)
             cond = {k: v.to(args.device) for k, v in batch.conditions.items()}
             maze = None if args.map_blind else batch.maze.to(args.device)
-            loss, info = diffusion.loss(trajs, cond, maze=maze)
+            alt_maze = None
+            if sib is not None:
+                mi = batch.map_idx.to(args.device)
+                k = (torch.rand(len(mi), device=args.device) * sib[2][mi]).long()
+                alt_maze = sib[0][sib[1][mi, k]]
+            loss, info = diffusion.loss(trajs, cond, maze=maze, alt_maze=alt_maze)
             if args.negative_weight > 0 and maze is not None:
                 from mapcond.collision import block_route_cell
                 _lo = torch.as_tensor(dataset.normalizer.bounds["observations"][0][:2],
@@ -698,6 +724,24 @@ def get_args(argv=None):
                         "one token per canvas cell and run JOINT attention over "
                         "trajectory + map tokens (MM-DiT style, "
                         "mapcond.dit_joint_models). Train from scratch.")
+    p.add_argument("--self_cond", action="store_true",
+                   help="With --dit_joint: self-conditioning -- the model also "
+                        "gets its own earlier x0 estimate (a draft) and reads "
+                        "trajectory-token positions from it instead of x_t. "
+                        "Two passes per step during training (first without "
+                        "gradient). See MapConditionalGaussianDiffusion."
+                        "set_self_cond.")
+    p.add_argument("--sc_alt_frac", type=float, default=0.25,
+                   help="With --self_cond: fraction of samples whose draft is "
+                        "estimated on another map of the same task family "
+                        "(teaches 'draft crosses a wall -> go around'). Half "
+                        "the samples always get no draft; the rest get an "
+                        "own-map draft.")
+    p.add_argument("--sc_max_lag", type=int, default=16,
+                   help="With --self_cond: draft is estimated at t + "
+                        "U{0..sc_max_lag}, matching the noisier previous step "
+                        "it comes from at sampling time (16-step DFS sampler: "
+                        "~16 timesteps apart).")
     p.add_argument("--init_from", type=str, default="",
                    help="Warm start from a train_multimap checkpoint (weights "
                         "only; fresh optimizer, EMA and step counter). Model "

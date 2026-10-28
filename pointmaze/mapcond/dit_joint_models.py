@@ -42,6 +42,28 @@ CFG: dropping the map replaces every map token's CONTENT with the learned
 null_map_emb (positions are kept); the guidance pass uses the same null.
 maze=None means the same thing (map unknown). The name null_map_emb is kept so
 mapcond.inference detects a CFG-trained checkpoint.
+
+Self-conditioning (self_cond=True; Chen, Zhang & Hinton 2022, "Analog Bits"):
+the model also receives a DRAFT -- its own earlier x0 estimate x_sc -- and
+  * the draft is concatenated to x_t at the patch embedding (4 -> 8 channels),
+  * trajectory-token 2D positions (Fourier pos + distance bias) are read from
+    the draft instead of x_t. This is the point of it: on held-out demos of the
+    training maps, mid-route token positions from x_t are 3.4 / 4.5 cells off
+    at t=150 / 200, from the model's own x0 estimate 0.2-0.4 / 0.3-1.1 cells,
+  * a learned flag (sc_flag) is added to c when a draft is present, so the
+    network knows which position source it is looking at.
+Samples without a draft (has_sc False) behave exactly as without
+self-conditioning, except for the zero half of the input.
+Training (two passes, first without gradient) lives in
+MapConditionalGaussianDiffusion.p_losses. At inference the model caches its
+own drafts when sc_cache_enabled is set (mapcond.inference does this): one per
+CFG branch, each pinned at start/goal and clamped to [-1, 1]. The cache is used
+only if the next call has the same batch size and a t that is not larger. Equal
+t is the TFG recurrence (recur_steps=2 for the newvar mazes,
+search/script_utils.py): the second recurrence re-noises back to the same t and
+gets the first one's estimate as its draft. A larger t means a new sampling
+chain or a DFS back-off to higher noise, which start draft-free;
+reset_self_cond() clears it explicitly (DFS calls it on reject / forced_best).
 """
 import math
 
@@ -49,7 +71,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from diffuser.models.helpers import SinusoidalPosEmb
+from diffuser.models.helpers import SinusoidalPosEmb, apply_conditioning
 
 from .dit1d import modulate, PatchEmbed1d, TokenPosEmb, FinalLayer1d
 
@@ -198,15 +220,18 @@ class JointMapDiT1D(nn.Module):
     def __init__(self, horizon, transition_dim, cond_dim,
                  hidden=256, heads=8, depth=4, patch_size=4, mlp_ratio=4.0,
                  map_encoder_hidden=32, pool_size=None, cfg_dropout=0.1,
-                 loc_init=None):
+                 loc_init=None, self_cond=False):
         super().__init__()
         # pool_size is accepted for interface parity with the other backbones
         # (train_multimap / inference pass it) and is unused: nothing is pooled.
         self.horizon = horizon
         self.transition_dim = transition_dim
         self.patch_size = patch_size
+        self.action_dim = transition_dim - cond_dim
+        self.self_cond = bool(self_cond)
 
-        self.patch_embed = PatchEmbed1d(horizon, transition_dim, patch_size, hidden)
+        in_feat = transition_dim * (2 if self.self_cond else 1)   # [x_t, draft]
+        self.patch_embed = PatchEmbed1d(horizon, in_feat, patch_size, hidden)
         self.n_tokens = self.patch_embed.n_tokens
         self.pos_emb = TokenPosEmb(hidden)
         self.time_mlp = nn.Sequential(
@@ -251,6 +276,32 @@ class JointMapDiT1D(nn.Module):
         self.register_buffer("canvas_hw", torch.zeros(2, dtype=torch.long))
         self.return_attn = False
         self._last_attn = None
+        if self.self_cond:
+            self.sc_flag = nn.Parameter(torch.zeros(hidden))
+        self.sc_cache_enabled = False
+        self._sc_cache = None
+
+    # ------------------------------------------------------------------ #
+    def reset_self_cond(self):
+        """Forget the cached drafts (next call runs draft-free)."""
+        self._sc_cache = None
+
+    def _cached_drafts(self, time, B):
+        cache = self._sc_cache
+        t_now = int(time.max().item())
+        if cache is None or cache["B"] != B or t_now > cache["t"]:
+            self._sc_cache = None
+            return None, None
+        return cache["cond"], cache["null"]
+
+    def _store_drafts(self, time, cond, out_cond, out_null):
+        def pin(o):
+            if o is None:
+                return None
+            o = o.detach().clamp(-1, 1)
+            return apply_conditioning(o, cond, self.action_dim) if cond else o
+        self._sc_cache = dict(t=int(time.max().item()), B=out_cond.shape[0],
+                              cond=pin(out_cond), null=pin(out_null))
 
     # ------------------------------------------------------------------ #
     def set_coord_map(self, scale, shift, canvas_hw):
@@ -324,7 +375,8 @@ class JointMapDiT1D(nn.Module):
         return [b.attn_bias(D_tm, D_mm, T2M, self.n_tokens) for b in self.blocks]
 
     def _run(self, x, c, content, geo, biases=None):
-        """biases: from _biases(geo); pass it in to share across the CFG passes."""
+        """x: patch-embedding input ([x_t, draft] with self_cond). biases: from
+        _biases(geo); pass it in to share across the CFG passes."""
         h_pos, m_pos = geo[0], geo[1]
         if biases is None:
             biases = self._biases(geo)
@@ -339,43 +391,82 @@ class JointMapDiT1D(nn.Module):
         self._last_attn = attns
         return self.final_layer(h, c)
 
-    def forward(self, x, cond, time, maze=None):
+    def _sc_inputs(self, x, c_time, x_sc):
+        """(patch-embedding input, tensor positions are read from, c) for a
+        draft x_sc [B,H,T] or None. A draft row that is all zero = no draft."""
+        if not self.self_cond:
+            return x, x, c_time
+        if x_sc is None:
+            return torch.cat([x, torch.zeros_like(x)], dim=-1), x, c_time
+        has = x_sc.abs().flatten(1).sum(1) > 0
+        return (torch.cat([x, x_sc], dim=-1),
+                torch.where(has[:, None, None], x_sc, x),
+                c_time + has.float()[:, None] * self.sc_flag)
+
+    def _branch(self, x, c_time, content, Hc, Wc, x_sc):
+        """One full pass. Returns (output, geometry, biases) so another branch
+        with the same draft can reuse the geometry."""
+        inp, geo_src, c = self._sc_inputs(x, c_time, x_sc)
+        geo = self._geometry(geo_src, Hc, Wc)
+        biases = self._biases(geo)
+        return self._run(inp, c, content, geo, biases), geo, biases
+
+    def forward(self, x, cond, time, maze=None, x_sc=None, drop=None):
         """
         x    : [B, horizon, transition_dim]
         maze : [B, H, W] or [B, 1, H, W] occupancy grid, or None (falls back
                to the bound grid; with neither, the map is treated as unknown,
                i.e. the CFG null branch).
+        x_sc : self-conditioning draft [B, horizon, transition_dim]; rows that
+               are all zero mean "no draft". None: use the inference cache if
+               enabled, otherwise run draft-free.
+        drop : CFG-dropout mask [B] (bool), sampled by the caller so that the
+               two self-conditioning passes drop the SAME samples. None: sample
+               it here when training, as before.
         """
         B = x.shape[0]
         if maze is None and self._bound_maze is not None:
             maze = self._bound_maze.expand(B, *self._bound_maze.shape[1:])
         if maze is not None and maze.dim() == 4:
             maze = maze[:, 0]
-        c = self.time_mlp(time)
+        c_time = self.time_mlp(time)
+
+        use_cache = (self.self_cond and x_sc is None and not self.training
+                     and self.sc_cache_enabled)
+        sc_cond, sc_null = self._cached_drafts(time, B) if use_cache else (x_sc, x_sc)
 
         if maze is None:
             Hc, Wc = (int(v) for v in self.canvas_hw.tolist())
-            geo = self._geometry(x, Hc, Wc)
             null = self.null_map_emb.view(1, 1, -1).expand(B, Hc * Wc, -1)
-            return self._run(x, c, null, geo)
+            out, _, _ = self._branch(x, c_time, null, Hc, Wc, sc_cond)
+            if use_cache:
+                self._store_drafts(time, cond, out, None)
+            return out
 
         Hc, Wc = maze.shape[-2:]
-        geo = self._geometry(x, Hc, Wc)
         content = self._map_content(maze)
         null = self.null_map_emb.view(1, 1, -1).expand_as(content)
-        if self.training and self.cfg_dropout > 0:
+        if drop is None and self.training and self.cfg_dropout > 0:
             drop = torch.rand(B, device=x.device) < self.cfg_dropout
+        if drop is not None:
             content = torch.where(drop[:, None, None], null, content)
 
-        biases = self._biases(geo)
-        out = self._run(x, c, content, geo, biases)
-
+        out, geo, biases = self._branch(x, c_time, content, Hc, Wc, sc_cond)
+        out_null = None
         if (not self.training) and self.guidance_scale > 0:
             if self._negative_maze is None:
                 content_neg = null
             else:
                 content_neg = self._map_content(
                     self._negative_maze.expand(B, *self._negative_maze.shape[1:]))
-            out_null = self._run(x, c, content_neg, geo, biases)
-            out = (1 + self.guidance_scale) * out - self.guidance_scale * out_null
+            if sc_null is sc_cond:       # same draft (or none): reuse geometry
+                inp, _, c = self._sc_inputs(x, c_time, sc_cond)
+                out_null = self._run(inp, c, content_neg, geo, biases)
+            else:                        # each CFG branch keeps its own draft
+                out_null, _, _ = self._branch(x, c_time, content_neg, Hc, Wc, sc_null)
+            if use_cache:
+                self._store_drafts(time, cond, out, out_null)
+            return (1 + self.guidance_scale) * out - self.guidance_scale * out_null
+        if use_cache:
+            self._store_drafts(time, cond, out, None)
         return out
