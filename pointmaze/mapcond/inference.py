@@ -62,7 +62,7 @@ def _infer_encoder_geometry(state):
 
 
 def load_mapcond_diffusion(ckpt_path, device="cpu", use_ema=True, horizon=None,
-                           guidance_scale=0.0):
+                           guidance_scale=0.0, sc_draft=True):
     """
     Rebuild a map-conditional diffusion model from a train_multimap checkpoint.
 
@@ -72,6 +72,9 @@ def load_mapcond_diffusion(ckpt_path, device="cpu", use_ema=True, horizon=None,
     checkpoint's config); call bind_env_map(diffusion.model, env, ...)
     before rolling out each task. `horizon` overrides the sampling horizon
     (the repo sets diffusion.horizon = sampling_horizon at inference).
+    sc_draft: for self-conditioning checkpoints, feed the model its previous
+    x0 as the draft (False: sample in the draft-free mode it was also trained
+    in).
     """
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     cfg = ckpt["config"]
@@ -155,7 +158,7 @@ def load_mapcond_diffusion(ckpt_path, device="cpu", use_ema=True, horizon=None,
     if getattr(diffusion.model, "self_cond", False):
         # every sampling loop (repo p_sample_loop, search pipelines, probes)
         # then feeds the model its own previous x0 as the draft
-        diffusion.model.sc_cache_enabled = True
+        diffusion.model.sc_cache_enabled = bool(sc_draft)
     diffusion.model.map_blind = bool(cfg.get("map_blind", False))
     if diffusion.model.map_blind:
         if guidance_scale > 0:

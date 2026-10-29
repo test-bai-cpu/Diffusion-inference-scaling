@@ -361,9 +361,15 @@ class MapConditionalGaussianDiffusion(GaussianDiffusion):
         loss would rarely show "draft crosses a wall here -> target goes
         around"; an estimate made on a sibling map follows that map's routes and
         crosses this map's walls, with the true demo as the target.
-        max_lag: the draft is estimated at t + U{0..max_lag} (same noise), since
-        at sampling time it comes from the previous, noisier step (~16
-        timesteps earlier with the 16-step DFS sampler).
+        max_lag: the draft is estimated at t + U{0..max_lag}, since at sampling
+        time it comes from the previous, noisier step (~16 timesteps earlier
+        with the 16-step DFS sampler). That noisier input is drawn from
+        q(x_{t+lag} | x_t) with FRESH noise, the joint law the sampler produces.
+        Reusing x_t's noise (an earlier version) leaks the target: x_t and
+        x_{t+lag} built from the same (x0, eps) are two linear equations in
+        x0. The model learned to extrapolate along draft -> x_t (at t=20 its
+        loss with such a draft was 10x below no draft, with a real-sampler draft
+        3x above), and sampling with its own drafts drove plans through walls.
         """
         assert 0 <= none_frac and 0 <= alt_frac and none_frac + alt_frac <= 1
         self.sc_none_frac = float(none_frac)
@@ -391,7 +397,9 @@ class MapConditionalGaussianDiffusion(GaussianDiffusion):
         with torch.no_grad():
             lag = torch.randint(0, max_lag + 1, (B,), device=dev)
             t_d = (t + lag).clamp(max=self.n_timesteps - 1)
-            x_d = apply_conditioning(self.q_sample(x_start=x_start, t=t_d, noise=noise),
+            # x_{t_d} ~ q(. | x_t), fresh noise (see set_self_cond)
+            k = (self.alphas_cumprod[t_d] / self.alphas_cumprod[t]).view(-1, 1, 1)
+            x_d = apply_conditioning(k.sqrt() * x_noisy + (1 - k).sqrt() * torch.randn_like(x_noisy),
                                      cond, self.action_dim)
             maze_d = maze
             if alt_frac > 0 and maze is not None:
